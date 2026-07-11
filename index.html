@@ -238,6 +238,26 @@
   .ai-section__note { font-size: 0.76rem; color: var(--color-ink-soft); margin: 6px 0 12px; }
   .ai-section__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
+  .ai-mode-switch {
+    border: 1px solid var(--color-border); border-radius: var(--radius);
+    padding: 10px 14px; margin: 0 0 14px; display: flex; flex-wrap: wrap; gap: 16px;
+  }
+  .ai-mode-switch legend { font-size: 0.76rem; color: var(--color-ink-soft); padding: 0 4px; }
+  .ai-mode-switch label { font-size: 0.85rem; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+  .ai-manual-step {
+    border: 1px solid var(--color-border); border-radius: var(--radius);
+    padding: 12px 14px; margin-bottom: 12px; background: #fbfaf7;
+  }
+  .ai-manual-step__title { font-weight: 700; margin: 0 0 8px; font-size: 0.88rem; }
+  .ai-manual-step__hint { font-size: 0.78rem; color: var(--color-ink-soft); margin: 0 0 8px; }
+  .ai-manual-step__howto { font-size: 0.78rem; color: var(--color-ink-soft); margin: 0 0 10px; padding-left: 20px; line-height: 1.7; }
+  .ai-paste-area {
+    display: block; width: 100%; min-height: 70px; margin: 10px 0;
+    font-family: monospace; font-size: 0.78rem; padding: 8px;
+    border: 1px solid var(--color-border); border-radius: 4px; box-sizing: border-box; resize: vertical;
+  }
+
   .ai-plan-result { margin-top: 16px; }
   .ai-plan-result h3 { font-size: 0.88rem; margin: 16px 0 6px; }
   .ai-plan-result h3:first-child { margin-top: 0; }
@@ -454,10 +474,49 @@
         プロンプトの文言は暫定版です。結果の精度に納得できない場合は、Fable 5セッションで
         プロンプトを見直すことを想定しています（詳細はREADME参照）。
       </p>
-      <div class="ai-section__actions">
-        <button id="btn-ai-summary" class="btn">① ページ要約を生成する（Haiku）</button>
-        <button id="btn-ai-design" class="btn" disabled>② 全体構成を分析する（Fable 5）</button>
+
+      <fieldset class="ai-mode-switch">
+        <legend>実行方法</legend>
+        <label>
+          <input type="radio" name="ai-mode" id="ai-mode-manual" value="manual" />
+          手動コピペモード（<strong>無料</strong>・claude.aiの無料枠を使用）
+        </label>
+        <label>
+          <input type="radio" name="ai-mode" id="ai-mode-api" value="api" />
+          APIキーで自動実行（有料・数十円程度/回）
+        </label>
+      </fieldset>
+
+      <!-- 手動コピペモード（無料） -->
+      <div id="ai-manual-panel">
+        <div class="ai-manual-step">
+          <p class="ai-manual-step__title">① ページ要約</p>
+          <ol class="ai-manual-step__howto">
+            <li><a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> を新しいタブで開く（無料アカウントでOK）</li>
+            <li>下のボタンでプロンプトをコピーし、claude.aiの新規チャットに貼り付けて送信</li>
+            <li>返ってきた回答（JSON）をコピーし、下の欄に貼り付けて「読み込む」を押す</li>
+          </ol>
+          <button id="btn-copy-summary-prompt" class="btn btn--ghost">①のプロンプトをコピーする</button>
+          <textarea id="paste-summary-response" class="ai-paste-area" placeholder="claude.aiの回答（JSON）をここに貼り付け"></textarea>
+          <button id="btn-load-summary-response" class="btn">貼り付けた回答を読み込む</button>
+        </div>
+        <div class="ai-manual-step">
+          <p class="ai-manual-step__title">② 全体構成分析</p>
+          <p class="ai-manual-step__hint">①を先に完了させてください（要約結果を②のプロンプトに含めるため）。</p>
+          <button id="btn-copy-design-prompt" class="btn btn--ghost" disabled>②のプロンプトをコピーする</button>
+          <textarea id="paste-design-response" class="ai-paste-area" placeholder="claude.aiの回答（JSON）をここに貼り付け"></textarea>
+          <button id="btn-load-design-response" class="btn">貼り付けた回答を読み込む</button>
+        </div>
       </div>
+
+      <!-- APIキー自動実行モード（有料） -->
+      <div id="ai-api-panel" hidden>
+        <div class="ai-section__actions">
+          <button id="btn-ai-summary" class="btn">① ページ要約を生成する（Haiku）</button>
+          <button id="btn-ai-design" class="btn" disabled>② 全体構成を分析する（Fable 5）</button>
+        </div>
+      </div>
+
       <p id="ai-status" class="status" aria-live="polite"></p>
 
       <div id="ai-plan-result" class="ai-plan-result" hidden>
@@ -2095,8 +2154,7 @@
 出力形式（配列の各要素）:
 {"index": 数値, "title": "推定タイトル", "oneLiner": "一文要約(40字程度)", "role": "役割"}`;
 
-  async function runSummaryStep(project, slides, onProgress) {
-    const models = await getModelSettings();
+  function buildSummaryUserContent(slides) {
     const input = slides.map((s) => ({
       index: s.index,
       text: s.textConcat.slice(0, 800),
@@ -2105,17 +2163,21 @@
       tableCount: s.elements.filter((e) => e.type === "table").length,
       hasNotes: !!s.notes,
     }));
-    if (onProgress) onProgress("Haikuでページ要約を生成中...");
-    const resultText = await callClaudeApi(
-      models.summaryModel,
-      SUMMARY_SYSTEM_PROMPT,
-      "<slides>\n" + JSON.stringify(input) + "\n</slides>",
-      4000,
-      "page-summary"
+    return "<slides>\n" + JSON.stringify(input) + "\n</slides>";
+  }
+
+  function buildSummaryCombinedText(slides) {
+    return (
+      SUMMARY_SYSTEM_PROMPT +
+      "\n\n" +
+      buildSummaryUserContent(slides) +
+      "\n\n(繰り返しますが、出力はJSON配列のみにしてください。説明文やコードフェンスは不要です。)"
     );
+  }
+
+  async function parseAndSaveSummaryResponse(resultText, slides) {
     const parsed = extractJson(resultText);
     if (!Array.isArray(parsed)) throw new Error("ページ要約の応答が配列ではありませんでした。");
-
     const byIndex = new Map(parsed.map((p) => [p.index, p]));
     for (const s of slides) {
       const summary = byIndex.get(s.index);
@@ -2125,6 +2187,19 @@
       }
     }
     return slides.map((s) => s.aiSummary).filter(Boolean);
+  }
+
+  async function runSummaryStep(project, slides, onProgress) {
+    const models = await getModelSettings();
+    if (onProgress) onProgress("Haikuでページ要約を生成中...");
+    const resultText = await callClaudeApi(
+      models.summaryModel,
+      SUMMARY_SYSTEM_PROMPT,
+      buildSummaryUserContent(slides),
+      4000,
+      "page-summary"
+    );
+    return parseAndSaveSummaryResponse(resultText, slides);
   }
 
   const DESIGN_SYSTEM_PROMPT = `あなたは展示会図録・学術発表スライドのデザインディレクターです。
@@ -2172,10 +2247,9 @@
   ]
 }`;
 
-  async function runDesignStep(project, slides, summaries, onProgress) {
-    const models = await getModelSettings();
+  function buildDesignUserContent(project, slides) {
     const repPages = pickRepresentativePages(slides);
-    const density = slides.map((s, i) => ({
+    const density = slides.map((s) => ({
       index: s.index,
       role: (s.aiSummary && s.aiSummary.role) || null,
       title: (s.aiSummary && s.aiSummary.title) || null,
@@ -2193,19 +2267,23 @@
       pages: density,
       representativePages: repPages,
     };
-    if (onProgress) onProgress("Fable 5で全体構成を分析中...（1〜2分ほどかかります）");
-    const resultText = await callClaudeApi(
-      models.designModel,
-      DESIGN_SYSTEM_PROMPT,
-      "<deck>\n" + JSON.stringify(input) + "\n</deck>",
-      10000,
-      "overall-design"
+    return "<deck>\n" + JSON.stringify(input) + "\n</deck>";
+  }
+
+  function buildDesignCombinedText(project, slides) {
+    return (
+      DESIGN_SYSTEM_PROMPT +
+      "\n\n" +
+      buildDesignUserContent(project, slides) +
+      "\n\n(繰り返しますが、出力はJSONオブジェクトのみにしてください。説明文やコードフェンスは不要です。)"
     );
+  }
+
+  async function parseAndSaveDesignResponse(resultText, project) {
     const parsed = extractJson(resultText);
     if (!parsed.designSystems || parsed.designSystems.length === 0) {
       throw new Error("デザインシステム案が応答に含まれていませんでした。");
     }
-
     project.aiPlan = {
       keyMessages: parsed.keyMessages || [],
       splitMergePlan: parsed.splitMergePlan || [],
@@ -2217,6 +2295,19 @@
     project.updatedAt = Date.now();
     await idbPut("projects", project);
     return project.aiPlan;
+  }
+
+  async function runDesignStep(project, slides, summaries, onProgress) {
+    const models = await getModelSettings();
+    if (onProgress) onProgress("Fable 5で全体構成を分析中...（1〜2分ほどかかります）");
+    const resultText = await callClaudeApi(
+      models.designModel,
+      DESIGN_SYSTEM_PROMPT,
+      buildDesignUserContent(project, slides),
+      10000,
+      "overall-design"
+    );
+    return parseAndSaveDesignResponse(resultText, project);
   }
 
   /* ============================================================
@@ -2695,10 +2786,85 @@
     });
   }
 
+  async function copyToClipboard(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function setupAiSection(project, slides) {
     renderAiPlan(project, slides);
     $("btn-ai-design").disabled = !slides.some((s) => s.aiSummary);
+    $("btn-copy-design-prompt").disabled = !slides.some((s) => s.aiSummary);
 
+    // --- モード切替（手動コピペ=無料 / APIキー=有料自動） ---
+    const manualPanel = $("ai-manual-panel");
+    const apiPanel = $("ai-api-panel");
+    function applyMode(mode) {
+      manualPanel.hidden = mode !== "manual";
+      apiPanel.hidden = mode !== "api";
+    }
+    const initialMode = getApiKey() ? "api" : "manual";
+    $("ai-mode-" + initialMode).checked = true;
+    applyMode(initialMode);
+    $("ai-mode-manual").addEventListener("change", () => applyMode("manual"));
+    $("ai-mode-api").addEventListener("change", () => applyMode("api"));
+
+    // --- 手動コピペモード（無料） ---
+    $("btn-copy-summary-prompt").onclick = async () => {
+      const ok = await copyToClipboard(buildSummaryCombinedText(slides));
+      setAiStatus(
+        ok
+          ? "①のプロンプトをコピーしました。claude.aiに貼り付けて送信してください。"
+          : "コピーに失敗しました。手動で選択してコピーしてください。",
+        ok ? "success" : "error"
+      );
+    };
+    $("btn-load-summary-response").onclick = async () => {
+      const text = $("paste-summary-response").value.trim();
+      if (!text) {
+        setAiStatus("貼り付け欄が空です。claude.aiの回答をコピーして貼り付けてください。", "error");
+        return;
+      }
+      try {
+        await parseAndSaveSummaryResponse(text, slides);
+        setAiStatus(`ページ要約を読み込みました（${slides.length}枚）。続けて②を実行できます。`, "success");
+        $("btn-ai-design").disabled = false;
+        $("btn-copy-design-prompt").disabled = false;
+      } catch (e) {
+        console.error(e);
+        setAiStatus("読み込みに失敗しました: " + e.message, "error");
+      }
+    };
+    $("btn-copy-design-prompt").onclick = async () => {
+      const ok = await copyToClipboard(buildDesignCombinedText(project, slides));
+      setAiStatus(
+        ok
+          ? "②のプロンプトをコピーしました。claude.aiに貼り付けて送信してください（少し長い回答が返ってきます）。"
+          : "コピーに失敗しました。手動で選択してコピーしてください。",
+        ok ? "success" : "error"
+      );
+    };
+    $("btn-load-design-response").onclick = async () => {
+      const text = $("paste-design-response").value.trim();
+      if (!text) {
+        setAiStatus("貼り付け欄が空です。claude.aiの回答をコピーして貼り付けてください。", "error");
+        return;
+      }
+      try {
+        await parseAndSaveDesignResponse(text, project);
+        renderAiPlan(project, slides);
+        setAiStatus("全体構成の分析結果を読み込みました。デザインシステム案から1つ選択してください。", "success");
+      } catch (e) {
+        console.error(e);
+        setAiStatus("読み込みに失敗しました: " + e.message, "error");
+      }
+    };
+
+    // --- APIキー自動実行モード（有料） ---
     $("btn-ai-summary").onclick = async () => {
       if (!getApiKey()) {
         setAiStatus("先に「⚙ 設定」からAPIキーを入力してください。", "error");
@@ -2710,6 +2876,7 @@
         await runSummaryStep(project, slides, (msg) => setAiStatus(msg, null));
         setAiStatus(`ページ要約が完了しました（${slides.length}枚）。続けて②を実行できます。`, "success");
         $("btn-ai-design").disabled = false;
+        $("btn-copy-design-prompt").disabled = false;
       } catch (e) {
         console.error(e);
         setAiStatus("ページ要約に失敗しました: " + e.message, "error");

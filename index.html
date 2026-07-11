@@ -216,6 +216,15 @@
   .verify-badge.ng { color: var(--color-danger); }
   .build-warnings { margin: 10px 0 0; padding-left: 20px; font-size: 0.78rem; color: var(--color-amber); }
 
+  .preserve-toggle-label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.78rem; margin: 6px 0 2px; cursor: pointer;
+  }
+  .preserve-toggle-label input[disabled] + span { color: var(--color-ink-soft); }
+  .preserve-toggle-hint {
+    margin: 2px 0 4px; font-size: 0.72rem; color: var(--color-amber); line-height: 1.5;
+  }
+
   /* --- スライドグリッド / サムネイル --- */
   .slide-grid {
     display: grid;
@@ -359,6 +368,14 @@
       </div>
       <p id="build-status" class="status" aria-live="polite"></p>
       <div id="build-result" class="build-result" hidden></div>
+      <div id="stale-warning" class="preserve-warning" hidden>
+        <h3>このプロジェクトは旧バージョンの解析データです</h3>
+        <p class="preserve-warning__note">
+          解析エンジンが更新され、図形ツールで作成した図形・アニメーション・画面切り替えを
+          認識できるようになりました。正確な書き出しのため、ホームに戻って同じpptxを
+          もう一度読み込み直してください（このプロジェクトの書き出しボタンは無効化されています）。
+        </p>
+      </div>
     </section>
 
     <section id="preserve-warning" class="preserve-warning" hidden>
@@ -462,6 +479,120 @@
     return emu / 914400;
   }
 
+  /* ============================================================
+   * 0.5. テーマカラーの解決
+   *   PowerPointの図形ツールで作った図形は、色を図形自身に持たず
+   *   <p:style> でテーマ色(accent1等)を参照する。これを実HEXへ解決する。
+   *   注意: 解析は1ファイルずつ順次実行されるため、モジュール変数で
+   *   現在のテーマを保持する（並行解析はしない前提）。
+   * ============================================================ */
+  let CURRENT_THEME = null; // Map<schemeName, "RRGGBB">
+
+  function parseThemeColors(themeXmlText) {
+    const map = new Map();
+    if (!themeXmlText) return map;
+    try {
+      const doc = parseXmlText(themeXmlText);
+      const scheme = doc.getElementsByTagNameNS(NS.a, "clrScheme")[0];
+      if (!scheme) return map;
+      for (const child of Array.from(scheme.children)) {
+        if (child.namespaceURI !== NS.a) continue;
+        const srgb = firstChildNS(child, NS.a, "srgbClr");
+        const sys = firstChildNS(child, NS.a, "sysClr");
+        const val = srgb ? srgb.getAttribute("val") : sys ? sys.getAttribute("lastClr") : null;
+        if (val) map.set(child.localName, val.toUpperCase());
+      }
+      // 既定のカラーマップ: bg1→lt1, tx1→dk1, bg2→lt2, tx2→dk2
+      if (map.has("lt1")) map.set("bg1", map.get("lt1"));
+      if (map.has("dk1")) map.set("tx1", map.get("dk1"));
+      if (map.has("lt2")) map.set("bg2", map.get("lt2"));
+      if (map.has("dk2")) map.set("tx2", map.get("dk2"));
+    } catch (e) {
+      console.warn("テーマ解析に失敗:", e);
+    }
+    return map;
+  }
+
+  function hexToRgb(hex) {
+    const n = parseInt(hex, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function rgbToHex(r, g, b) {
+    const c = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+    return (c(r) + c(g) + c(b)).toUpperCase();
+  }
+  function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0;
+    const l = (max + min) / 2;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+      else if (max === g) h = ((b - r) / d + 2) / 6;
+      else h = ((r - g) / d + 4) / 6;
+    }
+    return [h, s, l];
+  }
+  function hslToRgb(h, s, l) {
+    if (s === 0) { const v = l * 255; return [v, v, v]; }
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    return [hue2rgb(p, q, h + 1 / 3) * 255, hue2rgb(p, q, h) * 255, hue2rgb(p, q, h - 1 / 3) * 255];
+  }
+
+  /** schemeClr要素の子(lumMod/lumOff/tint/shade)を近似適用する。
+   *  厳密なOOXMLの色計算とは僅かに差が出ることがある（既知の近似）。 */
+  function applyColorMods(hex, schemeEl) {
+    let [r, g, b] = hexToRgb(hex);
+    const getVal = (name) => {
+      const el = firstChildNS(schemeEl, NS.a, name);
+      return el ? parseInt(el.getAttribute("val"), 10) / 100000 : null;
+    };
+    const tint = getVal("tint");
+    if (tint !== null) { r = r * tint + 255 * (1 - tint); g = g * tint + 255 * (1 - tint); b = b * tint + 255 * (1 - tint); }
+    const shade = getVal("shade");
+    if (shade !== null) { r *= shade; g *= shade; b *= shade; }
+    const lumMod = getVal("lumMod");
+    const lumOff = getVal("lumOff");
+    if (lumMod !== null || lumOff !== null) {
+      let [h, s, l] = rgbToHsl(r, g, b);
+      if (lumMod !== null) l *= lumMod;
+      if (lumOff !== null) l += lumOff;
+      l = Math.max(0, Math.min(1, l));
+      [r, g, b] = hslToRgb(h, s, l);
+    }
+    return rgbToHex(r, g, b);
+  }
+
+  /** a:srgbClr / a:schemeClr を含む親要素から "#RRGGBB" を解決する（不能ならnull） */
+  function resolveColorFrom(parentEl) {
+    if (!parentEl) return null;
+    const srgb = firstChildNS(parentEl, NS.a, "srgbClr");
+    if (srgb) {
+      const base = (srgb.getAttribute("val") || "").toUpperCase();
+      if (!/^[0-9A-F]{6}$/.test(base)) return null;
+      return "#" + applyColorMods(base, srgb);
+    }
+    const scheme = firstChildNS(parentEl, NS.a, "schemeClr");
+    if (scheme) {
+      const name = scheme.getAttribute("val");
+      const base = CURRENT_THEME ? CURRENT_THEME.get(name) : null;
+      if (!base) return null;
+      return "#" + applyColorMods(base, scheme);
+    }
+    return null;
+  }
+
   async function sha256Hex(input) {
     const data =
       typeof input === "string" ? new TextEncoder().encode(input) : input;
@@ -499,7 +630,26 @@
     ole: "埋め込みオブジェクト",
     video: "動画",
     audio: "音声",
+    animation: "アニメーション",
   };
+
+  /** アニメーション効果の検出: p:timing内に実際の効果ノードがあるかを見る */
+  function detectAnimation(xmlText) {
+    if (!xmlText.includes("<p:timing")) return false;
+    return /<p:(anim|animEffect|animMotion|animClr|animRot|animScale|set|cmd)\b/.test(xmlText);
+  }
+
+  /** 画面切り替え(transition)のXML断片を取り出す。
+   *  mc:AlternateContentで包まれている場合はp14拡張を含まないFallback側を選ぶ
+   *  （再構築スライドへ注入する際、名前空間宣言の問題を避けるため）。 */
+  function extractTransitionXml(xmlText) {
+    const matches = xmlText.match(/<p:transition\b[^>]*\/>|<p:transition\b[\s\S]*?<\/p:transition>/g);
+    if (!matches) return null;
+    for (const m of matches) {
+      if (!m.includes("p14:") && !m.includes("mc:")) return m;
+    }
+    return null;
+  }
 
   /* ============================================================
    * 2. xfrm（位置・サイズ）読み取り & グループ変換
@@ -531,12 +681,7 @@
   function extractColor(rPr) {
     if (!rPr) return null;
     const fill = firstChildNS(rPr, NS.a, "solidFill");
-    if (!fill) return null;
-    const srgb = firstChildNS(fill, NS.a, "srgbClr");
-    if (srgb) return "#" + srgb.getAttribute("val");
-    const scheme = firstChildNS(fill, NS.a, "schemeClr");
-    if (scheme) return "scheme:" + scheme.getAttribute("val");
-    return null;
+    return resolveColorFrom(fill); // srgb/schemeどちらも "#RRGGBB" へ解決（不能ならnull）
   }
 
   function extractParagraphs(txBody) {
@@ -627,9 +772,7 @@
     const solidFill = firstChildNS(spPr, NS.a, "solidFill");
     const noFill = firstChildNS(spPr, NS.a, "noFill");
     if (solidFill) {
-      const srgb = firstChildNS(solidFill, NS.a, "srgbClr");
-      const scheme = firstChildNS(solidFill, NS.a, "schemeClr");
-      fill = { type: "solid", color: srgb ? "#" + srgb.getAttribute("val") : scheme ? "scheme:" + scheme.getAttribute("val") : null };
+      fill = { type: "solid", color: resolveColorFrom(solidFill) };
     } else if (noFill) {
       fill = { type: "none" };
     }
@@ -639,11 +782,9 @@
       const lnFill = firstChildNS(ln, NS.a, "solidFill");
       const lnNoFill = firstChildNS(ln, NS.a, "noFill");
       if (lnFill) {
-        const srgb = firstChildNS(lnFill, NS.a, "srgbClr");
-        const scheme = firstChildNS(lnFill, NS.a, "schemeClr");
         const widthEmu = ln.getAttribute("w");
         line = {
-          color: srgb ? "#" + srgb.getAttribute("val") : scheme ? "scheme:" + scheme.getAttribute("val") : null,
+          color: resolveColorFrom(lnFill),
           widthPt: widthEmu ? Math.round((parseInt(widthEmu, 10) / 12700) * 100) / 100 : null,
         };
       } else if (lnNoFill) {
@@ -653,6 +794,38 @@
     return { fill, line };
   }
 
+  /** <p:style> のfillRef/lnRef（テーマスタイル参照）から塗り・線を解決する。
+   *  PowerPointの図形ツールで作ったままの図形は spPr に色を持たず、
+   *  ここを見ないと「色なし」と誤判定してしまう（実際に発生した不具合）。 */
+  function extractStyleRefs(spEl) {
+    const styleEl = firstChildNS(spEl, NS.p, "style");
+    if (!styleEl) return { fill: null, line: null };
+    let fill = null, line = null;
+    const fillRef = firstChildNS(styleEl, NS.a, "fillRef");
+    if (fillRef && parseInt(fillRef.getAttribute("idx") || "0", 10) > 0) {
+      const c = resolveColorFrom(fillRef);
+      if (c) fill = { type: "solid", color: c, fromStyle: true };
+    }
+    const lnRef = firstChildNS(styleEl, NS.a, "lnRef");
+    if (lnRef && parseInt(lnRef.getAttribute("idx") || "0", 10) > 0) {
+      const c = resolveColorFrom(lnRef);
+      if (c) line = { color: c, widthPt: null, fromStyle: true };
+    }
+    return { fill, line };
+  }
+
+  /** テキストボックス（txBox="1"）またはプレースホルダーかどうかを判定する。
+   *  これらは「文章の器」であり、装飾図形とは出力時の扱いを分ける。 */
+  function isTextBoxShape(spEl) {
+    const nvSpPr = firstChildNS(spEl, NS.p, "nvSpPr");
+    if (!nvSpPr) return false;
+    const cNvSpPr = firstChildNS(nvSpPr, NS.p, "cNvSpPr");
+    if (cNvSpPr && cNvSpPr.getAttribute("txBox") === "1") return true;
+    const nvPr = firstChildNS(nvSpPr, NS.p, "nvPr");
+    if (nvPr && firstChildNS(nvPr, NS.p, "ph")) return true;
+    return false;
+  }
+
   function getPrstGeom(spPr) {
     if (!spPr) return "rect";
     const geom = firstChildNS(spPr, NS.a, "prstGeom");
@@ -660,16 +833,20 @@
   }
 
   // p:sp (図形/テキストボックス) と p:cxnSp (コネクタ線) は、OOXML上ほぼ同じ構造を持つ。
-  // Phase 1では「テキストを持つ図形」しか要素化していなかったが、装飾用の矩形・矢印・
-  // コネクタ線などテキストを持たない図形もブラッシュアップ対象として認識する（ユーザー指摘対応）。
+  // 装飾用の矩形・矢印・コネクタ線などテキストを持たない図形もブラッシュアップ対象として認識する。
+  // 色は spPr の明示指定 → <p:style> のテーマスタイル参照、の順で解決する。
   async function handleShapeLike(spEl, mapFn, ctx, isConnector) {
     const spPr = firstChildNS(spEl, NS.p, "spPr");
     const rawXfrm = spPr ? getSpXfrmRaw(spPr) : null;
     const abs = rawXfrm ? mapFn(rawXfrm) : null;
     const txBody = isConnector ? null : firstChildNS(spEl, NS.p, "txBody");
     const paragraphs = txBody ? extractParagraphs(txBody) : [];
-    const { fill, line } = extractFillAndLine(spPr);
+    let { fill, line } = extractFillAndLine(spPr);
+    const styleRefs = extractStyleRefs(spEl);
+    if (!fill && styleRefs.fill) fill = styleRefs.fill;
+    if (!line && styleRefs.line) line = styleRefs.line;
     const shapeType = isConnector ? "line" : getPrstGeom(spPr);
+    const isTextBox = isConnector ? false : isTextBoxShape(spEl);
     ctx.elements.push({
       type: "shape",
       origin: "source",
@@ -679,6 +856,7 @@
       h: abs ? emuToIn(abs.cyEmu) : null,
       rotDeg: abs ? abs.rotDeg || (rawXfrm ? rawXfrm.rotDeg : 0) : 0,
       shapeType,
+      isTextBox,
       fill,
       line,
       paragraphs,
@@ -831,7 +1009,9 @@
    * ============================================================ */
   async function parseOneSlide(zip, slidePath, index) {
     const xmlText = await zip.file(slidePath).async("text");
-    const preserveInfo = detectPreserve(xmlText);
+    const preserveInfo = detectPreserve(xmlText); // ハード温存理由（グラフ/SmartArt等: 再構築不能）
+    const hasAnimation = detectAnimation(xmlText); // ソフト温存理由（再構築可能だがアニメは失われる）
+    const transitionXml = extractTransitionXml(xmlText); // 画面切り替えは再構築スライドへ引き継ぐ
     const doc = parseXmlText(xmlText);
     const spTree = getSpTree(doc);
     const relsPath = relsPathFor(slidePath);
@@ -851,13 +1031,29 @@
     return {
       index,
       sourcePath: slidePath,
-      preserve: preserveInfo.preserve,
-      preserveReasons: preserveInfo.reasons,
+      // preserve: ハード理由 or アニメーションで初期値true。
+      // アニメーションのみの場合はUIのチェックボックスで解除（=再構築）可能
+      preserve: preserveInfo.preserve || hasAnimation,
+      preserveReasons: preserveInfo.reasons, // ハード理由のみ（解除不能）
+      hasAnimation,
+      hasTransition: !!transitionXml,
+      transitionXml,
+      preserveOverride: null, // ユーザーによる上書き（null=初期値のまま）
       notes,
       elements: ctx.elements,
       mediaStore: ctx.mediaStore,
       textConcat,
     };
+  }
+
+  /** スライドの実効的な温存判定。
+   *  ハード理由（グラフ等）は常に温存。それ以外はユーザー上書き＞初期値の順。 */
+  function effectivePreserve(slide) {
+    if (slide.preserveReasons && slide.preserveReasons.length > 0) return true;
+    if (slide.preserveOverride !== null && slide.preserveOverride !== undefined) {
+      return slide.preserveOverride;
+    }
+    return !!slide.preserve;
   }
 
   async function parsePptx(file, onProgress) {
@@ -892,6 +1088,22 @@
           cy: parseInt(sldSzEl.getAttribute("cy") || "6858000", 10),
         }
       : { cx: 12192000, cy: 6858000 };
+
+    // テーマカラーを先に読み込む（schemeClr → 実HEX解決のため）
+    CURRENT_THEME = null;
+    const presRelsDoc = presRelsFile ? parseXmlText(await presRelsFile.async("text")) : null;
+    if (presRelsDoc) {
+      for (const relEl of Array.from(presRelsDoc.getElementsByTagNameNS(NS.rel, "Relationship"))) {
+        if ((relEl.getAttribute("Type") || "").endsWith("/theme")) {
+          const themePath = resolvePath("ppt", relEl.getAttribute("Target"));
+          const themeFile = zip.file(themePath);
+          if (themeFile) {
+            CURRENT_THEME = parseThemeColors(await themeFile.async("text"));
+          }
+          break;
+        }
+      }
+    }
 
     const sldIdLst = firstChildNS(presDoc.documentElement, NS.p, "sldIdLst");
     const sldIdEls = sldIdLst ? childrenNS(sldIdLst, NS.p, "sldId") : [];
@@ -1004,7 +1216,16 @@
 
     if (el.type === "text" || el.type === "shape") {
       const hasText = (elementPlainText(el) || "").trim() !== "";
-      if (el.type === "shape" && (el.shapeType !== "rect" || el.fill || el.line)) {
+      // 図形本体を描くかどうか:
+      // ・テキストボックス/プレースホルダー以外（=図形ツールで作った図形）は常に描く
+      //   （色が解決できなくても図形を消さない。以前は色なし矩形を描画対象外として
+      //     いたため「図形が全て消える」不具合が起きていた）
+      // ・テキストボックスでも、明示的な塗り/線があれば描く
+      const isRealShape = el.type === "shape" && el.isTextBox === false;
+      const hasVisual =
+        (el.fill && el.fill.type === "solid" && pgColor(el.fill.color)) ||
+        (el.line && !el.line.none && pgColor(el.line.color));
+      if (isRealShape || (el.type === "shape" && hasVisual)) {
         const shapeOpts = { ...baseOpts };
         if (el.fill && el.fill.type === "solid" && pgColor(el.fill.color)) {
           shapeOpts.fill = { color: pgColor(el.fill.color) };
@@ -1202,14 +1423,17 @@
   }
 
   /**
-   * 温存スライドを、PptxGenJS出力zipへ「そのままの見た目」で差し込む。
-   * 最難関の処理（実装引き継ぎ書§5）。相対パス参照が壊れないよう、
+   * 出力zipへのZIPレベル後処理。次の2つを行う:
+   *   ① 温存スライドを元パーツのまま差し込む（グラフ等を完全無傷で保持）
+   *   ② 再構築スライドに元の画面切り替え(p:transition)を注入して引き継ぐ
+   * 実装引き継ぎ書§5の「最難関」処理。相対パス参照が壊れないよう、
    * すべてのスライドパーツは ppt/slides/ 直下に留め、メディア/チャート等の
    * 衝突だけを個別に回避する。
    */
-  async function injectPreservedSlides(genBlob, sourceBlob, orderedSlideMeta) {
+  async function postProcessOutput(genBlob, sourceBlob, orderedSlideMeta) {
     const genZip = await JSZip.loadAsync(await genBlob.arrayBuffer());
-    const sourceZip = await JSZip.loadAsync(await sourceBlob.arrayBuffer());
+    const hasPreserved = orderedSlideMeta.some((m) => m.preserve);
+    const sourceZip = hasPreserved ? await JSZip.loadAsync(await sourceBlob.arrayBuffer()) : null;
 
     const outFiles = new Map(); // path -> {type:'string'|'binary', data}
     const usedPaths = new Set();
@@ -1241,7 +1465,9 @@
 
     // Content_Types のマージ（コピーされた全パーツ分。スライド自身も含める）
     const allCopied = new Map(renameMap);
-    const mergedCt = await mergeContentTypes(genZip, sourceZip, allCopied);
+    const mergedCt = hasPreserved
+      ? await mergeContentTypes(genZip, sourceZip, allCopied)
+      : await genZip.file(CONTENT_TYPES_PATH).async("text");
 
     // 生成側(gen)の非温存スライドの出力順パス一覧を取得
     const genPresDoc = parseXmlText(await genZip.file("ppt/presentation.xml").async("text"));
@@ -1267,9 +1493,19 @@
       }
     }
 
-    // 非温存(gen由来)スライドとその.relsを出力ファイル一覧へ登録
-    for (const p of genOrderedPaths) {
-      outFiles.set(p, { type: "string", data: await genZip.file(p).async("text") });
+    // 非温存(gen由来)スライドとその.relsを出力ファイル一覧へ登録。
+    // このとき、元スライドが画面切り替え(p:transition)を持っていたら注入して引き継ぐ。
+    // p:sldの子要素順序はスキーマ上 cSld → clrMapOvr → transition → timing なので、
+    // 末尾（</p:sld>直前）への挿入で正しい位置になる。
+    const rebuiltMetaInOrder = orderedSlideMeta.filter((m) => !m.preserve);
+    for (let gi = 0; gi < genOrderedPaths.length; gi++) {
+      const p = genOrderedPaths[gi];
+      let slideXml = await genZip.file(p).async("text");
+      const meta = rebuiltMetaInOrder[gi];
+      if (meta && meta.transitionXml && !slideXml.includes("<p:transition")) {
+        slideXml = slideXml.replace("</p:sld>", meta.transitionXml + "</p:sld>");
+      }
+      outFiles.set(p, { type: "string", data: slideXml });
       const rp = relsPathFor(p);
       if (genZip.file(rp)) {
         outFiles.set(rp, { type: "string", data: await genZip.file(rp).async("text") });
@@ -1348,10 +1584,10 @@
 
   async function buildOutputPptx(project, slides, mediaRecords, onProgress) {
     const mediaById = new Map(mediaRecords.map((m) => [m.mediaId, m]));
-    const preserveSlides = slides.filter((s) => s.preserve);
+    const preserveSlides = slides.filter((s) => effectivePreserve(s));
     if (preserveSlides.length > 0 && !project.sourceBlob) {
       throw new Error(
-        "温存対象スライドがありますが、元ファイルの控えがないため再現できません（Phase 2以前に解析されたプロジェクトの可能性があります）。お手数ですが pptx を再度読み込み直してください。"
+        "温存対象スライドがありますが、元ファイルの控えがないため再現できません（旧バージョンで解析されたプロジェクトの可能性があります）。お手数ですが pptx を再度読み込み直してください。"
       );
     }
 
@@ -1360,9 +1596,14 @@
     pgPptx.layout = "SBK_CUSTOM";
 
     const warnings = [];
-    const nonPreserved = slides.filter((s) => !s.preserve);
+    const nonPreserved = slides.filter((s) => !effectivePreserve(s));
     for (let i = 0; i < nonPreserved.length; i++) {
       const s = nonPreserved[i];
+      if (s.hasAnimation) {
+        warnings.push(
+          `スライド${s.index + 1}: 温存を解除して再構築したため、アニメーションは失われました（画面切り替えは維持されます）。`
+        );
+      }
       const pgSlide = pgPptx.addSlide();
       for (const el of s.elements) {
         await addElementToSlide(pgPptx, pgSlide, el, mediaById, warnings);
@@ -1372,14 +1613,17 @@
 
     const genBlob = await pgPptx.write({ outputType: "blob" });
 
+    // ZIP後処理が必要になるのは: ①温存スライドの注入 ②再構築スライドへの画面切り替え引き継ぎ
+    const needsTransitionInject = nonPreserved.some((s) => s.transitionXml);
     let finalBlob = genBlob;
-    if (preserveSlides.length > 0) {
+    if (preserveSlides.length > 0 || needsTransitionInject) {
       const orderedSlideMeta = slides.map((s) => ({
         logicalIndex: s.index,
-        preserve: s.preserve,
+        preserve: effectivePreserve(s),
         sourcePath: s.sourcePath,
+        transitionXml: s.transitionXml || null,
       }));
-      finalBlob = await injectPreservedSlides(genBlob, project.sourceBlob, orderedSlideMeta);
+      finalBlob = await postProcessOutput(genBlob, project.sourceBlob, orderedSlideMeta);
     }
 
     return { blob: finalBlob, warnings };
@@ -1525,10 +1769,12 @@
     return all;
   }
 
+  const PARSER_VERSION = 3; // 図形スタイル参照・テーマ色・アニメーション検出対応版
+
   async function saveNewProject(file, parseResult) {
     const id = crypto.randomUUID();
     const now = Date.now();
-    const preserveCount = parseResult.slides.filter((s) => s.preserve).length;
+    const preserveCount = parseResult.slides.filter((s) => effectivePreserve(s)).length;
     const totalTextChars = parseResult.slides.reduce(
       (sum, s) => sum + (s.textConcat ? s.textConcat.length : 0),
       0
@@ -1539,6 +1785,7 @@
       createdAt: now,
       updatedAt: now,
       phase: 1,
+      parserVersion: PARSER_VERSION,
       sourceFileName: file.name,
       // 温存スライドをZIP注入で再現するため、元ファイルそのものも保持する（Phase 2で使用）
       sourceBlob: new Blob([parseResult.sourceArrayBuffer], {
@@ -1729,6 +1976,7 @@
       if (el.type === "text") {
         box.textContent = elementPlainText(el).slice(0, 80);
       } else if (el.type === "shape") {
+        if (el.isTextBox) box.className = "thumb-el thumb-el--text"; // 文章の器は点線表示
         if (el.fill && el.fill.type === "solid" && el.fill.color && el.fill.color.startsWith("#")) {
           box.style.background = el.fill.color;
         }
@@ -1779,17 +2027,25 @@
     $("stat-slide-count").textContent = project.slideCount;
     $("stat-text-chars").textContent = project.totalTextChars.toLocaleString("ja-JP");
     $("stat-image-count").textContent = mediaRecords.length;
-    $("stat-preserve-count").textContent = project.preserveCount;
+    $("stat-preserve-count").textContent = slides.filter((s) => effectivePreserve(s)).length;
+
+    // 旧バージョンの解析エンジンで作られたプロジェクトは、図形・アニメーション情報を
+    // 持っていないため、書き出しを止めて再読み込みを促す（不完全な出力を防ぐ）
+    const isStale = (project.parserVersion || 1) < PARSER_VERSION;
+    $("btn-build-output").disabled = isStale;
+    const staleWarn = $("stale-warning");
+    staleWarn.hidden = !isStale;
 
     const warnSection = $("preserve-warning");
     const warnList = $("preserve-warning-list");
     warnList.innerHTML = "";
-    const preserved = slides.filter((s) => s.preserve);
+    const preserved = slides.filter((s) => effectivePreserve(s));
     warnSection.hidden = preserved.length === 0;
     for (const s of preserved) {
       const li = document.createElement("li");
-      const reasons = s.preserveReasons.map((r) => PRESERVE_LABELS[r] || r).join("・");
-      li.textContent = `スライド ${s.index + 1}: ${reasons}`;
+      const labels = s.preserveReasons.map((r) => PRESERVE_LABELS[r] || r);
+      if (s.hasAnimation) labels.push(PRESERVE_LABELS.animation);
+      li.textContent = `スライド ${s.index + 1}: ${labels.join("・") || "手動指定"}`;
       warnList.appendChild(li);
     }
 
@@ -1810,12 +2066,63 @@
       card.appendChild(canvas);
 
       const imgCount = s.elements.filter((e) => e.type === "image").length;
+      const shapeCount = s.elements.filter((e) => e.type === "shape" && !e.isTextBox).length;
       const stats = document.createElement("p");
       stats.className = "slide-card__stats";
-      stats.textContent = `テキスト${s.textConcat.length}文字 ／ 画像${imgCount}点${
-        s.notes ? " ／ ノートあり" : ""
-      }`;
+      const flags = [];
+      if (s.hasAnimation) flags.push("アニメーションあり");
+      if (s.hasTransition) flags.push("画面切り替えあり");
+      if (s.notes) flags.push("ノートあり");
+      stats.textContent =
+        `テキスト${s.textConcat.length}文字 ／ 画像${imgCount}点 ／ 図形${shapeCount}個` +
+        (flags.length ? " ／ " + flags.join("・") : "");
       card.appendChild(stats);
+
+      // 温存トグル: ハード理由（グラフ等＝再構築不能）は解除不可。
+      // アニメーションのみの温存は解除可能（解除するとアニメは失われる旨を明記）
+      const hardPreserve = s.preserveReasons && s.preserveReasons.length > 0;
+      const toggleWrap = document.createElement("label");
+      toggleWrap.className = "preserve-toggle-label";
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.className = "preserve-toggle";
+      toggle.checked = effectivePreserve(s);
+      toggle.disabled = hardPreserve || isStale;
+      const toggleText = document.createElement("span");
+      toggleText.textContent = hardPreserve
+        ? "元のまま温存（" + s.preserveReasons.map((r) => PRESERVE_LABELS[r] || r).join("・") + "を含むため解除不可）"
+        : "元のまま温存する";
+      toggleWrap.appendChild(toggle);
+      toggleWrap.appendChild(toggleText);
+      card.appendChild(toggleWrap);
+      if (!hardPreserve && s.hasAnimation) {
+        const hint = document.createElement("p");
+        hint.className = "preserve-toggle-hint";
+        hint.textContent =
+          "アニメーションを含むため初期設定で温存されます。チェックを外すと再構築の対象になります（アニメーションは失われ、画面切り替えは維持されます）。";
+        card.appendChild(hint);
+      }
+      toggle.addEventListener("change", async () => {
+        s.preserveOverride = toggle.checked;
+        // 表示は即時（同期）更新し、永続化は後追いで行う
+        const newCount = slides.filter((x) => effectivePreserve(x)).length;
+        $("stat-preserve-count").textContent = newCount;
+        project.preserveCount = newCount;
+        project.updatedAt = Date.now();
+        await idbPut("slides", s);
+        await idbPut("projects", project);
+        // 警告リストも更新
+        warnList.innerHTML = "";
+        const nowPreserved = slides.filter((x) => effectivePreserve(x));
+        warnSection.hidden = nowPreserved.length === 0;
+        for (const x of nowPreserved) {
+          const li = document.createElement("li");
+          const labels = x.preserveReasons.map((r) => PRESERVE_LABELS[r] || r);
+          if (x.hasAnimation) labels.push(PRESERVE_LABELS.animation);
+          li.textContent = `スライド ${x.index + 1}: ${labels.join("・") || "手動指定"}`;
+          warnList.appendChild(li);
+        }
+      });
 
       const details = document.createElement("details");
       const summary = document.createElement("summary");

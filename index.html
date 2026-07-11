@@ -225,6 +225,65 @@
     margin: 2px 0 4px; font-size: 0.72rem; color: var(--color-amber); line-height: 1.5;
   }
 
+  /* --- AI分析セクション（Phase 3） --- */
+  .ai-section {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 20px;
+  }
+  .ai-section__header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .ai-section__header .section-heading { margin: 0; }
+  .ai-section__note { font-size: 0.76rem; color: var(--color-ink-soft); margin: 6px 0 12px; }
+  .ai-section__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  .ai-plan-result { margin-top: 16px; }
+  .ai-plan-result h3 { font-size: 0.88rem; margin: 16px 0 6px; }
+  .ai-plan-result h3:first-child { margin-top: 0; }
+  #ai-key-messages { margin: 0; padding-left: 20px; font-size: 0.88rem; }
+  .ai-plan-list { list-style: none; margin: 0; padding: 0; font-size: 0.82rem; }
+  .ai-plan-list li {
+    border-left: 3px solid var(--color-celadon); padding: 6px 10px; margin-bottom: 6px;
+    background: #f7faf8;
+  }
+  .ai-plan-list .plan-rationale { color: var(--color-ink-soft); font-size: 0.76rem; display: block; margin-top: 2px; }
+
+  .design-system-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .design-card {
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 14px;
+  }
+  .design-card.is-selected { border-color: var(--color-celadon); background: #f2f6f3; }
+  .design-card__name { font-weight: 700; margin: 0 0 4px; }
+  .design-card__concept { font-size: 0.8rem; color: var(--color-ink-soft); margin: 0 0 10px; }
+  .design-card__swatches { display: flex; gap: 6px; margin-bottom: 10px; }
+  .swatch { width: 28px; height: 28px; border-radius: 4px; border: 1px solid rgba(0,0,0,0.15); }
+  .design-card__type { font-size: 0.76rem; color: var(--color-ink-soft); margin: 0 0 10px; }
+  .design-card__previews {
+    display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 10px;
+  }
+  .design-preview-canvas {
+    position: relative; flex: 0 0 auto; background: #fff;
+    box-shadow: 0 0 0 1px var(--color-border);
+  }
+  .design-preview-block { position: absolute; overflow: hidden; font-size: 5px; line-height: 1.2; padding: 1px; }
+
+  /* --- AI設定モーダル --- */
+  .modal-box--wide { max-width: 440px; }
+  .ai-settings__note { font-size: 0.76rem; color: var(--color-ink-soft); margin: 0 0 14px; line-height: 1.6; }
+  .ai-settings__field { display: block; margin-bottom: 12px; font-size: 0.82rem; }
+  .ai-settings__field span { display: block; margin-bottom: 4px; color: var(--color-ink-soft); }
+  .ai-settings__field input {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--color-border);
+    border-radius: 4px; font-size: 0.85rem; font-family: inherit; box-sizing: border-box;
+  }
+
   /* --- スライドグリッド / サムネイル --- */
   .slide-grid {
     display: grid;
@@ -386,8 +445,66 @@
       </p>
     </section>
 
+    <section id="ai-section" class="ai-section">
+      <div class="ai-section__header">
+        <h2 class="section-heading">AIによる全体構成分析（Phase 3）</h2>
+        <button id="btn-ai-settings" class="btn btn--ghost btn--small" title="APIキー・モデル設定">⚙ 設定</button>
+      </div>
+      <p class="ai-section__note">
+        プロンプトの文言は暫定版です。結果の精度に納得できない場合は、Fable 5セッションで
+        プロンプトを見直すことを想定しています（詳細はREADME参照）。
+      </p>
+      <div class="ai-section__actions">
+        <button id="btn-ai-summary" class="btn">① ページ要約を生成する（Haiku）</button>
+        <button id="btn-ai-design" class="btn" disabled>② 全体構成を分析する（Fable 5）</button>
+      </div>
+      <p id="ai-status" class="status" aria-live="polite"></p>
+
+      <div id="ai-plan-result" class="ai-plan-result" hidden>
+        <h3>キーメッセージ</h3>
+        <ul id="ai-key-messages"></ul>
+        <h3>分割/統合プラン</h3>
+        <ul id="ai-split-merge-plan" class="ai-plan-list"></ul>
+        <h3>反復スライド挿入計画</h3>
+        <ul id="ai-repeat-plan" class="ai-plan-list"></ul>
+        <h3>デザインシステム案（1つ選択してください）</h3>
+        <div id="ai-design-systems" class="design-system-grid"></div>
+      </div>
+    </section>
+
     <section class="slide-grid" id="slide-grid"></section>
   </main>
+
+  <!-- ============ AI設定モーダル ============ -->
+  <div class="modal-overlay" id="ai-settings-overlay">
+    <div class="modal-box modal-box--wide">
+      <h3>AI設定</h3>
+      <p class="ai-settings__note">
+        APIキーはこのタブを閉じるまでの間だけブラウザ内に保持され、サーバー等には保存されません
+        （設計書§4の方針: sessionStorage）。次にこのページを開いたときは再入力が必要です。
+      </p>
+      <label class="ai-settings__field">
+        <span>Anthropic APIキー</span>
+        <input type="password" id="input-api-key" placeholder="sk-ant-..." autocomplete="off" />
+      </label>
+      <label class="ai-settings__field">
+        <span>全体設計モデル（① キーメッセージ・デザイン案）</span>
+        <input type="text" id="input-model-design" />
+      </label>
+      <label class="ai-settings__field">
+        <span>ページ要約モデル（軽量・一括）</span>
+        <input type="text" id="input-model-summary" />
+      </label>
+      <label class="ai-settings__field">
+        <span>ページ生成モデル（Phase 5で使用予定）</span>
+        <input type="text" id="input-model-page" />
+      </label>
+      <div class="modal-actions">
+        <button id="ai-settings-btn-cancel" class="btn btn--ghost">キャンセル</button>
+        <button id="ai-settings-btn-save" class="btn">保存</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ============ 確認モーダル ============ -->
   <div class="modal-overlay" id="modal-overlay">
@@ -1651,7 +1768,7 @@
    * 7. IndexedDB
    * ============================================================ */
   const DB_NAME = "slide-brushup";
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   let dbPromise = null;
 
   function openDb() {
@@ -1671,6 +1788,11 @@
         }
         if (!db.objectStoreNames.contains("aiLog")) {
           db.createObjectStore("aiLog", { keyPath: "id", autoIncrement: true });
+        }
+        // Phase 3: モデルID等の非機密設定のみ永続化。APIキーは意図的にここへ保存しない
+        // （設計書§4: キー保管方式はsessionStorage。タブを閉じると消える方が安全なため）
+        if (!db.objectStoreNames.contains("settings")) {
+          db.createObjectStore("settings", { keyPath: "key" });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -1821,6 +1943,280 @@
     await idbPutMany("media", mediaRecords);
 
     return id;
+  }
+
+  /* ============================================================
+   * 7.5. AI連携（Phase 3）
+   *   ・APIキーは sessionStorage に保存する（タブを閉じると消える）。
+   *     設計書§4の通り、モデルIDは設定画面で差し替え可能にし、
+   *     キーはIndexedDBのような永続ストレージには置かない方針とした。
+   *   ・プロンプト文言は実装引き継ぎ書§9に基づくドラフト。
+   *     「文言の確定はFable 5で行う」と明記されているため、
+   *     ここでの文言は暫定版として扱い、精度に納得できない場合は
+   *     Fable 5セッションでの見直しを推奨する（README参照）。
+   * ============================================================ */
+  const API_KEY_SESSION_KEY = "sbk_anthropic_api_key";
+  const DEFAULT_MODELS = {
+    designModel: "claude-fable-5", // 全体設計（1回・贅沢に）
+    pageModel: "claude-sonnet-5", // ページspec生成（Phase 5で使用予定）
+    summaryModel: "claude-haiku-4-5-20251001", // 各ページ要約（軽量・一括）
+  };
+
+  function getApiKey() {
+    return sessionStorage.getItem(API_KEY_SESSION_KEY) || "";
+  }
+  function setApiKey(key) {
+    if (key) sessionStorage.setItem(API_KEY_SESSION_KEY, key);
+    else sessionStorage.removeItem(API_KEY_SESSION_KEY);
+  }
+
+  async function getModelSettings() {
+    const rec = await idbGet("settings", "models");
+    return rec ? { ...DEFAULT_MODELS, ...rec.value } : { ...DEFAULT_MODELS };
+  }
+  async function saveModelSettings(models) {
+    await idbPut("settings", { key: "models", value: models });
+  }
+
+  /** Claude APIをブラウザから直接呼び出す（anthropic-dangerous-direct-browser-access）。
+   *  戻り値: レスポンス本文のテキスト部分を連結した文字列。 */
+  async function callClaudeApi(model, systemPrompt, userContent, maxTokens, purpose) {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error("APIキーが設定されていません。設定（歯車アイコン）から入力してください。");
+
+    const startedAt = Date.now();
+    let res;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userContent }],
+        }),
+      });
+    } catch (e) {
+      throw new Error(
+        "Claude APIへの接続に失敗しました。ネットワーク状況、またはブラウザの拡張機能等による" +
+          "通信ブロックをご確認ください。（詳細: " + e.message + "）"
+      );
+    }
+
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const errJson = await res.json();
+        detail = errJson.error && errJson.error.message ? errJson.error.message : JSON.stringify(errJson);
+      } catch {
+        detail = await res.text().catch(() => "");
+      }
+      if (res.status === 401) {
+        throw new Error("APIキーが無効です。設定を確認してください。");
+      }
+      if (res.status === 429) {
+        throw new Error("APIのレート制限に達しました。しばらく待ってから再試行してください。");
+      }
+      throw new Error(`Claude API エラー(${res.status}): ${detail}`);
+    }
+
+    const data = await res.json();
+    const text = (data.content || [])
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+
+    try {
+      await idbPut("aiLog", {
+        purpose,
+        model,
+        startedAt,
+        durationMs: Date.now() - startedAt,
+        inputChars: (systemPrompt || "").length + (typeof userContent === "string" ? userContent.length : 0),
+        outputChars: text.length,
+        usage: data.usage || null,
+      });
+    } catch {
+      /* ログ保存の失敗は致命的ではないため無視 */
+    }
+
+    return text;
+  }
+
+  /** レスポンステキストからJSONを取り出す。```json フェンスに包まれていても対応する。 */
+  function extractJson(text) {
+    let t = text.trim();
+    const fenceMatch = t.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) t = fenceMatch[1].trim();
+    try {
+      return JSON.parse(t);
+    } catch (e) {
+      throw new Error(
+        "AIの応答をJSONとして解釈できませんでした。応答の先頭200文字: " + t.slice(0, 200)
+      );
+    }
+  }
+
+  /** デザイン提案のプレビュー対象として、内容の異なる代表ページを最大5枚選ぶ
+   *  （表紙らしき先頭・画像が多いページ・文字が多いページ・表を含むページ・中間点、の順に候補化して重複を除く）。 */
+  function pickRepresentativePages(slides) {
+    const withStats = slides.map((s) => ({
+      index: s.index,
+      chars: s.textConcat.length,
+      images: s.elements.filter((e) => e.type === "image").length,
+      tables: s.elements.filter((e) => e.type === "table").length,
+    }));
+    const candidates = [];
+    if (withStats.length > 0) candidates.push(withStats[0].index);
+    candidates.push([...withStats].sort((a, b) => b.images - a.images)[0]?.index);
+    candidates.push([...withStats].sort((a, b) => b.chars - a.chars)[0]?.index);
+    const withTable = withStats.find((s) => s.tables > 0);
+    if (withTable) candidates.push(withTable.index);
+    candidates.push(withStats[Math.floor(withStats.length / 2)]?.index);
+    const uniq = Array.from(new Set(candidates.filter((v) => v !== undefined)));
+    return uniq.slice(0, 5);
+  }
+
+  const SUMMARY_SYSTEM_PROMPT = `あなたは展示会図録・学術発表スライドの構成を分析するアシスタントです。
+入力として与えられる各スライドの抽出テキストと要素数から、スライドごとに
+「役割分類」「タイトル推定」「一文要約」を行ってください。
+
+制約:
+- 要約は入力テキストの言い換えに限り、新しい事実や数値を創作しないこと
+- roleは次のいずれか一語: 表紙 / 目次 / 本文 / データ図表 / まとめ / その他
+- 出力はJSON配列のみ。前置き・後書き・コードフェンスは一切付けないこと
+
+出力形式（配列の各要素）:
+{"index": 数値, "title": "推定タイトル", "oneLiner": "一文要約(40字程度)", "role": "役割"}`;
+
+  async function runSummaryStep(project, slides, onProgress) {
+    const models = await getModelSettings();
+    const input = slides.map((s) => ({
+      index: s.index,
+      text: s.textConcat.slice(0, 800),
+      imageCount: s.elements.filter((e) => e.type === "image").length,
+      shapeCount: s.elements.filter((e) => e.type === "shape" && !e.isTextBox).length,
+      tableCount: s.elements.filter((e) => e.type === "table").length,
+      hasNotes: !!s.notes,
+    }));
+    if (onProgress) onProgress("Haikuでページ要約を生成中...");
+    const resultText = await callClaudeApi(
+      models.summaryModel,
+      SUMMARY_SYSTEM_PROMPT,
+      "<slides>\n" + JSON.stringify(input) + "\n</slides>",
+      4000,
+      "page-summary"
+    );
+    const parsed = extractJson(resultText);
+    if (!Array.isArray(parsed)) throw new Error("ページ要約の応答が配列ではありませんでした。");
+
+    const byIndex = new Map(parsed.map((p) => [p.index, p]));
+    for (const s of slides) {
+      const summary = byIndex.get(s.index);
+      if (summary) {
+        s.aiSummary = { title: summary.title || "", oneLiner: summary.oneLiner || "", role: summary.role || "その他" };
+        await idbPut("slides", s);
+      }
+    }
+    return slides.map((s) => s.aiSummary).filter(Boolean);
+  }
+
+  const DESIGN_SYSTEM_PROMPT = `あなたは展示会図録・学術発表スライドのデザインディレクターです。
+デッキ全体の要約カードと密度メトリクスをもとに、次の4点を検討してください。
+
+1. キーメッセージ: デッキ全体を通じて伝えたい要点を3〜5個
+2. 分割/統合プラン: 情報が過密/過疎なスライドの分割・統合提案（各項目に根拠を必ず記す。
+   提案がなければ空配列でよい）
+3. 反復スライド挿入計画: キーメッセージを反復して印象付けるための挿入位置・見せ方の提案
+   （不要と判断すれば空配列でよい）
+4. デザインシステム案を3つ。各案は次の制約を必ず満たすこと:
+   - 配色は「主色(6〜7割の面積を占める)＋補助色1〜2色＋アクセント色1色」の3階層構成
+   - タイトルは36pt以上、本文は14〜16ptとし、両者のサイズ差を明確にすること
+   - 本文は左揃えを基本とすること
+   - 装飾目的だけのアクセントバーやタイトル下線は使わないこと（単調な「AIっぽい」定型装飾を避ける）
+   - 3案は互いに方向性が明確に異なること（例: 端正な学術系／余白を活かした現代美術系／
+     情報密度を活かした資料系、など。この例に縛られず内容に即して判断すること）
+
+さらに、与えられた代表ページ（representativePages）それぞれについて、3案ごとに
+簡易プレビュー用のブロック配置（blocks）を作成してください。blocksは実際の再構築ではなく
+概観比較用の簡略版で構いません（4〜8ブロック程度、見出し・本文・画像枠・アクセント要素など）。
+
+出力はJSONオブジェクトのみ。前置き・後書き・コードフェンスは一切付けないこと。
+座標(x,y,w,h)の単位はインチで、渡されるslideWidthIn/slideHeightInの範囲に収めること。
+
+出力形式:
+{
+  "keyMessages": ["...", "..."],
+  "splitMergePlan": [{"targetIndices": [数値,...], "action": "split|merge|keep", "rationale": "..."}],
+  "repeatPlan": [{"message": "...", "suggestedIndices": [数値,...], "rationale": "..."}],
+  "designSystems": [
+    {
+      "name": "案の名称",
+      "concept": "一文でのコンセプト説明",
+      "palette": {"primary": "#RRGGBB", "secondary": "#RRGGBB", "accent": "#RRGGBB", "background": "#RRGGBB"},
+      "typography": {"titleFont": "フォント名の方向性", "bodyFont": "フォント名の方向性", "titleSizePt": 数値, "bodySizePt": 数値},
+      "notes": "運用上の注意点があれば",
+      "previews": [
+        {"pageIndex": 数値, "blocks": [
+          {"type": "title|body|image_placeholder|accent", "x": 数値, "y": 数値, "w": 数値, "h": 数値,
+           "text": "表示する短いテキスト(あれば)", "colorRole": "primary|secondary|accent|background"}
+        ]}
+      ]
+    }
+  ]
+}`;
+
+  async function runDesignStep(project, slides, summaries, onProgress) {
+    const models = await getModelSettings();
+    const repPages = pickRepresentativePages(slides);
+    const density = slides.map((s, i) => ({
+      index: s.index,
+      role: (s.aiSummary && s.aiSummary.role) || null,
+      title: (s.aiSummary && s.aiSummary.title) || null,
+      oneLiner: (s.aiSummary && s.aiSummary.oneLiner) || null,
+      charCount: s.textConcat.length,
+      imageCount: s.elements.filter((e) => e.type === "image").length,
+      shapeCount: s.elements.filter((e) => e.type === "shape" && !e.isTextBox).length,
+      tableCount: s.elements.filter((e) => e.type === "table").length,
+      preserve: effectivePreserve(s),
+    }));
+    const input = {
+      slideWidthIn: project.slideSize.wIn,
+      slideHeightIn: project.slideSize.hIn,
+      totalSlides: slides.length,
+      pages: density,
+      representativePages: repPages,
+    };
+    if (onProgress) onProgress("Fable 5で全体構成を分析中...（1〜2分ほどかかります）");
+    const resultText = await callClaudeApi(
+      models.designModel,
+      DESIGN_SYSTEM_PROMPT,
+      "<deck>\n" + JSON.stringify(input) + "\n</deck>",
+      10000,
+      "overall-design"
+    );
+    const parsed = extractJson(resultText);
+    if (!parsed.designSystems || parsed.designSystems.length === 0) {
+      throw new Error("デザインシステム案が応答に含まれていませんでした。");
+    }
+
+    project.aiPlan = {
+      keyMessages: parsed.keyMessages || [],
+      splitMergePlan: parsed.splitMergePlan || [],
+      repeatPlan: parsed.repeatPlan || [],
+      designSystems: parsed.designSystems,
+      generatedAt: Date.now(),
+    };
+    project.selectedDesignSystemIndex = null;
+    project.updatedAt = Date.now();
+    await idbPut("projects", project);
+    return project.aiPlan;
   }
 
   /* ============================================================
@@ -2149,7 +2545,219 @@
     };
     $("btn-build-output").onclick = () => handleBuildOutput(project, slides, mediaRecords);
 
+    setupAiSection(project, slides);
+
     showScreen("analysis");
+  }
+
+  /* ============================================================
+   * 10.5 UI: AI連携セクション（Phase 3）
+   * ============================================================ */
+  function setAiStatus(text, kind) {
+    const el = $("ai-status");
+    el.textContent = text || "";
+    el.classList.remove("is-error", "is-success");
+    if (kind) el.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  const DESIGN_COLOR_ROLE_FALLBACK = { primary: "#888888", secondary: "#bbbbbb", accent: "#c08a3e", background: "#ffffff" };
+
+  function renderDesignPreviewCanvas(container, slideSize, blocks, palette) {
+    const W = 130;
+    const scale = W / slideSize.wIn;
+    const H = slideSize.hIn * scale;
+    container.style.width = W + "px";
+    container.style.height = H + "px";
+    container.style.background = palette.background || "#ffffff";
+    container.innerHTML = "";
+    for (const b of blocks || []) {
+      const box = document.createElement("div");
+      box.className = "design-preview-block";
+      box.style.left = Math.max(0, b.x * scale) + "px";
+      box.style.top = Math.max(0, b.y * scale) + "px";
+      box.style.width = Math.max(2, b.w * scale) + "px";
+      box.style.height = Math.max(2, b.h * scale) + "px";
+      const color = palette[b.colorRole] || DESIGN_COLOR_ROLE_FALLBACK[b.colorRole] || "#cccccc";
+      if (b.type === "image_placeholder") {
+        box.style.background = color;
+        box.style.opacity = "0.35";
+      } else if (b.type === "accent") {
+        box.style.background = color;
+      } else {
+        box.style.color = color;
+        box.style.fontWeight = b.type === "title" ? "700" : "400";
+        box.textContent = (b.text || "").slice(0, 40);
+      }
+      container.appendChild(box);
+    }
+  }
+
+  function renderAiPlan(project, slides) {
+    const plan = project.aiPlan;
+    const resultBox = $("ai-plan-result");
+    if (!plan) {
+      resultBox.hidden = true;
+      return;
+    }
+    resultBox.hidden = false;
+
+    const kmList = $("ai-key-messages");
+    kmList.innerHTML = "";
+    for (const km of plan.keyMessages) {
+      const li = document.createElement("li");
+      li.textContent = km;
+      kmList.appendChild(li);
+    }
+
+    const smList = $("ai-split-merge-plan");
+    smList.innerHTML = "";
+    if (plan.splitMergePlan.length === 0) {
+      smList.innerHTML = "<li>特に提案はありません（現状のままで問題ないという判断です）。</li>";
+    }
+    for (const item of plan.splitMergePlan) {
+      const li = document.createElement("li");
+      const actionLabel = { split: "分割", merge: "統合", keep: "現状維持" }[item.action] || item.action;
+      const pages = (item.targetIndices || []).map((i) => i + 1).join(", ");
+      li.innerHTML = `<strong>${actionLabel}</strong>（スライド ${pages}）<span class="plan-rationale">${escapeHtml(item.rationale || "")}</span>`;
+      smList.appendChild(li);
+    }
+
+    const rpList = $("ai-repeat-plan");
+    rpList.innerHTML = "";
+    if (plan.repeatPlan.length === 0) {
+      rpList.innerHTML = "<li>特に提案はありません。</li>";
+    }
+    for (const item of plan.repeatPlan) {
+      const li = document.createElement("li");
+      const pages = (item.suggestedIndices || []).map((i) => i + 1).join(", ");
+      li.innerHTML = `<strong>${escapeHtml(item.message || "")}</strong>（挿入案: スライド ${pages}）<span class="plan-rationale">${escapeHtml(item.rationale || "")}</span>`;
+      rpList.appendChild(li);
+    }
+
+    const grid = $("ai-design-systems");
+    grid.innerHTML = "";
+    plan.designSystems.forEach((ds, dsIndex) => {
+      const card = document.createElement("div");
+      card.className = "design-card" + (project.selectedDesignSystemIndex === dsIndex ? " is-selected" : "");
+
+      const name = document.createElement("p");
+      name.className = "design-card__name";
+      name.textContent = ds.name;
+      card.appendChild(name);
+
+      const concept = document.createElement("p");
+      concept.className = "design-card__concept";
+      concept.textContent = ds.concept;
+      card.appendChild(concept);
+
+      const swatches = document.createElement("div");
+      swatches.className = "design-card__swatches";
+      for (const role of ["primary", "secondary", "accent", "background"]) {
+        if (!ds.palette || !ds.palette[role]) continue;
+        const sw = document.createElement("div");
+        sw.className = "swatch";
+        sw.style.background = ds.palette[role];
+        sw.title = role + ": " + ds.palette[role];
+        swatches.appendChild(sw);
+      }
+      card.appendChild(swatches);
+
+      const typo = document.createElement("p");
+      typo.className = "design-card__type";
+      if (ds.typography) {
+        typo.textContent = `見出し: ${ds.typography.titleFont || "-"} ${ds.typography.titleSizePt || "-"}pt ／ 本文: ${ds.typography.bodyFont || "-"} ${ds.typography.bodySizePt || "-"}pt`;
+      }
+      card.appendChild(typo);
+
+      const previews = document.createElement("div");
+      previews.className = "design-card__previews";
+      for (const pv of ds.previews || []) {
+        const c = document.createElement("div");
+        c.className = "design-preview-canvas";
+        renderDesignPreviewCanvas(c, project.slideSize, pv.blocks, ds.palette || {});
+        previews.appendChild(c);
+      }
+      card.appendChild(previews);
+
+      const selectBtn = document.createElement("button");
+      selectBtn.className = "btn btn--small" + (project.selectedDesignSystemIndex === dsIndex ? "" : " btn--ghost");
+      selectBtn.textContent = project.selectedDesignSystemIndex === dsIndex ? "採用中" : "この案を採用する";
+      selectBtn.addEventListener("click", async () => {
+        project.selectedDesignSystemIndex = dsIndex;
+        project.updatedAt = Date.now();
+        await idbPut("projects", project);
+        renderAiPlan(project, slides);
+        setAiStatus(`「${ds.name}」を採用しました。この後のフェーズで全ページへ適用します。`, "success");
+      });
+      card.appendChild(selectBtn);
+
+      grid.appendChild(card);
+    });
+  }
+
+  async function setupAiSection(project, slides) {
+    renderAiPlan(project, slides);
+    $("btn-ai-design").disabled = !slides.some((s) => s.aiSummary);
+
+    $("btn-ai-summary").onclick = async () => {
+      if (!getApiKey()) {
+        setAiStatus("先に「⚙ 設定」からAPIキーを入力してください。", "error");
+        return;
+      }
+      $("btn-ai-summary").disabled = true;
+      try {
+        setAiStatus("ページ要約を生成中...", null);
+        await runSummaryStep(project, slides, (msg) => setAiStatus(msg, null));
+        setAiStatus(`ページ要約が完了しました（${slides.length}枚）。続けて②を実行できます。`, "success");
+        $("btn-ai-design").disabled = false;
+      } catch (e) {
+        console.error(e);
+        setAiStatus("ページ要約に失敗しました: " + e.message, "error");
+      } finally {
+        $("btn-ai-summary").disabled = false;
+      }
+    };
+
+    $("btn-ai-design").onclick = async () => {
+      if (!getApiKey()) {
+        setAiStatus("先に「⚙ 設定」からAPIキーを入力してください。", "error");
+        return;
+      }
+      $("btn-ai-design").disabled = true;
+      try {
+        setAiStatus("全体構成を分析中...", null);
+        await runDesignStep(project, slides, (msg) => setAiStatus(msg, null));
+        renderAiPlan(project, slides);
+        setAiStatus("全体構成の分析が完了しました。デザインシステム案から1つ選択してください。", "success");
+      } catch (e) {
+        console.error(e);
+        setAiStatus("全体構成の分析に失敗しました: " + e.message, "error");
+      } finally {
+        $("btn-ai-design").disabled = false;
+      }
+    };
+  }
+
+  function setupAiSettingsModal() {
+    const overlay = $("ai-settings-overlay");
+    $("btn-ai-settings").addEventListener("click", async () => {
+      $("input-api-key").value = getApiKey();
+      const models = await getModelSettings();
+      $("input-model-design").value = models.designModel;
+      $("input-model-summary").value = models.summaryModel;
+      $("input-model-page").value = models.pageModel;
+      overlay.classList.add("is-open");
+    });
+    $("ai-settings-btn-cancel").addEventListener("click", () => overlay.classList.remove("is-open"));
+    $("ai-settings-btn-save").addEventListener("click", async () => {
+      setApiKey($("input-api-key").value.trim());
+      await saveModelSettings({
+        designModel: $("input-model-design").value.trim() || DEFAULT_MODELS.designModel,
+        summaryModel: $("input-model-summary").value.trim() || DEFAULT_MODELS.summaryModel,
+        pageModel: $("input-model-page").value.trim() || DEFAULT_MODELS.pageModel,
+      });
+      overlay.classList.remove("is-open");
+    });
   }
 
   function setBuildStatus(text, kind) {
@@ -2285,6 +2893,7 @@
       );
     }
     setupDropzone();
+    setupAiSettingsModal();
     $("btn-back-home").addEventListener("click", () => {
       showScreen("home");
       refreshProjectList();

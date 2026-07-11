@@ -1,0 +1,1371 @@
+<!doctype html>
+<!--
+  スライドブラッシュアップ工房 / Phase 1: インポート・解析
+  ------------------------------------------------------------
+  設計書: スライドブラッシュアップ工房_設計書_2026-07-10.md
+  引き継ぎ書: スライドブラッシュアップ工房_実装引き継ぎ書_2026-07-10.md
+
+  このファイルの役割（Phase 1の範囲）:
+    ・.pptx をドロップ/選択してブラウザ内で解析（JSZip + DOMParser、AI不使用）
+    ・全テキスト・全画像・位置情報・発表者ノートを抽出
+    ・スライド単位/デッキ全体のテキストハッシュ台帳を作成（改変検出の基盤）
+    ・画像のバイトハッシュを保存（改変検出の基盤）
+    ・グラフ/SmartArt/動画/音声を含むスライドの「温存」検出
+    ・IndexedDBへ保存し、サムネイル一覧で確認できるようにする
+
+  このファイルの範囲外（Phase 2以降）:
+    ・レイアウト再設計・デザイン提案（AI呼び出し）
+    ・.pptx / .sbk の書き出し（PptxGenJS。libs/pptxgen.min.js は未使用）
+    ・図表の自動生成
+
+  依存: libs/jszip.min.js（同フォルダに配置。本文末尾でscript読み込み）
+  永続化: IndexedDB（画像Blobを含むため localStorage は使用しない）
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>スライドブラッシュアップ工房</title>
+<style>
+  :root {
+    --color-bg: #f7f5f1;
+    --color-surface: #ffffff;
+    --color-ink: #262a2e;
+    --color-ink-soft: #5b6168;
+    --color-border: #ddd8ce;
+    --color-celadon: #7c9985;
+    --color-celadon-dark: #4f6b5a;
+    --color-clay: #b08968;
+    --color-amber: #c08a3e;
+    --color-amber-bg: #fbf1de;
+    --color-danger: #b4553f;
+    --font-display: "Hiragino Mincho ProN", "Yu Mincho", "游明朝", serif;
+    --font-ui: "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic",
+      "游ゴシック", system-ui, -apple-system, sans-serif;
+    --radius: 6px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-ui);
+    line-height: 1.6;
+  }
+
+  .app-shell {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 24px 20px 80px;
+  }
+
+  .app-header {
+    padding-bottom: 18px;
+    margin-bottom: 28px;
+    position: relative;
+  }
+  .app-header::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 4px;
+    background:
+      linear-gradient(var(--color-celadon), var(--color-celadon)) left / 100% 1px no-repeat,
+      linear-gradient(var(--color-border), var(--color-border)) left bottom / 100% 1px no-repeat;
+  }
+  .app-title {
+    font-family: var(--font-display);
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0 0 4px;
+    letter-spacing: 0.02em;
+  }
+  .app-subtitle {
+    margin: 0;
+    color: var(--color-ink-soft);
+    font-size: 0.88rem;
+  }
+
+  .section-heading {
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0 0 12px;
+    padding-left: 10px;
+    border-left: 4px solid var(--color-celadon);
+  }
+
+  /* --- ドロップゾーン --- */
+  .dropzone {
+    border: 2px dashed var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    padding: 40px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone:hover, .dropzone:focus-visible, .dropzone.is-dragover {
+    border-color: var(--color-celadon);
+    background: #f2f6f3;
+    outline: none;
+  }
+  .dropzone__label { font-size: 1.05rem; font-weight: 700; margin: 0 0 6px; }
+  .dropzone__sub { margin: 0; color: var(--color-ink-soft); font-size: 0.85rem; }
+
+  .status {
+    min-height: 1.4em;
+    margin: 10px 2px 0;
+    font-size: 0.88rem;
+    color: var(--color-ink-soft);
+  }
+  .status.is-error { color: var(--color-danger); font-weight: 700; }
+  .status.is-success { color: var(--color-celadon-dark); font-weight: 700; }
+
+  /* --- プロジェクト一覧 --- */
+  .project-list-section { margin-top: 40px; }
+  .project-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 14px;
+  }
+  .project-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 14px;
+  }
+  .project-card__name { font-weight: 700; margin: 0 0 6px; word-break: break-all; }
+  .project-card__meta { margin: 0 0 12px; font-size: 0.8rem; color: var(--color-ink-soft); }
+  .project-card__actions { display: flex; gap: 8px; }
+
+  .empty-state {
+    color: var(--color-ink-soft);
+    font-size: 0.9rem;
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius);
+    padding: 20px;
+    text-align: center;
+  }
+
+  /* --- ボタン --- */
+  .btn {
+    font-family: inherit;
+    font-size: 0.85rem;
+    padding: 8px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--color-celadon-dark);
+    background: var(--color-celadon);
+    color: #fff;
+    cursor: pointer;
+  }
+  .btn:hover { background: var(--color-celadon-dark); }
+  .btn--ghost {
+    background: transparent;
+    color: var(--color-ink);
+    border-color: var(--color-border);
+  }
+  .btn--ghost:hover { background: #eee9df; }
+  .btn--danger { background: var(--color-danger); border-color: #8f4231; }
+  .btn--danger:hover { background: #8f4231; }
+  .btn--small { padding: 5px 10px; font-size: 0.78rem; }
+
+  /* --- 解析画面: サマリーバー --- */
+  .summary-bar {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin: 16px 0 20px;
+  }
+  .summary-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin: 10px 0 16px;
+  }
+  .summary-stats dt { font-size: 0.75rem; color: var(--color-ink-soft); margin: 0; }
+  .summary-stats dd { font-size: 1.3rem; font-weight: 700; margin: 2px 0 0; }
+  .summary-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  .preserve-warning {
+    background: var(--color-amber-bg);
+    border: 1px solid var(--color-amber);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin-bottom: 20px;
+  }
+  .preserve-warning h3 { margin: 0 0 8px; font-size: 0.9rem; }
+  .preserve-warning ul { margin: 0 0 8px; padding-left: 20px; font-size: 0.85rem; }
+  .preserve-warning__note { margin: 0; font-size: 0.78rem; color: var(--color-ink-soft); }
+
+  /* --- スライドグリッド / サムネイル --- */
+  .slide-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 18px;
+  }
+  .slide-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 12px;
+  }
+  .slide-card__index {
+    font-size: 0.75rem;
+    color: var(--color-ink-soft);
+    margin: 0 0 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .slide-canvas {
+    position: relative;
+    background: #fff;
+    overflow: hidden;
+    /* 磁器の高台をイメージした二重の縁取り */
+    box-shadow:
+      0 0 0 1px var(--color-border),
+      0 0 0 4px var(--color-bg),
+      0 0 0 5px var(--color-border);
+    margin-bottom: 8px;
+  }
+  .thumb-el {
+    position: absolute;
+    overflow: hidden;
+    font-size: 6px;
+    line-height: 1.3;
+    color: #333;
+    padding: 1px 2px;
+  }
+  .thumb-el--text { border: 1px dotted #cbd3ce; }
+  .thumb-el--table { border: 1px dashed var(--color-clay); background: #faf6f0; font-size: 6px; }
+  .thumb-el--image img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .thumb-el--unsupported-img {
+    display: flex; align-items: center; justify-content: center;
+    background: #eee; color: #888; font-size: 5.5px; text-align: center;
+  }
+  .thumb-preserve-badge {
+    position: absolute; top: 4px; right: 4px;
+    background: var(--color-amber);
+    color: #fff;
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .slide-card__stats { font-size: 0.75rem; color: var(--color-ink-soft); margin: 0 0 6px; }
+  .slide-card details { font-size: 0.78rem; }
+  .slide-card summary { cursor: pointer; color: var(--color-celadon-dark); }
+  .slide-card pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #faf9f6;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 8px;
+    margin: 6px 0 0;
+    max-height: 180px;
+    overflow: auto;
+  }
+
+  /* --- モーダル --- */
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(38,42,46,0.45);
+    display: none;
+    align-items: center; justify-content: center;
+    padding: 20px;
+    z-index: 50;
+  }
+  .modal-overlay.is-open { display: flex; }
+  .modal-box {
+    background: #fff;
+    border-radius: var(--radius);
+    padding: 20px;
+    max-width: 360px;
+    width: 100%;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 480px) {
+    .app-shell { padding: 16px 12px 60px; }
+    .dropzone { padding: 28px 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="app-shell">
+
+  <header class="app-header">
+    <h1 class="app-title">スライドブラッシュアップ工房</h1>
+    <p class="app-subtitle">pptxを解析し、視認性とデザインを洗練させる ─ Phase 1: インポート・解析</p>
+  </header>
+
+  <!-- ============ ホーム画面 ============ -->
+  <main id="screen-home" class="screen">
+    <section class="dropzone" id="dropzone" tabindex="0" role="button"
+      aria-label="pptxファイルをドロップまたは選択">
+      <p class="dropzone__label">ここに .pptx ファイルをドロップ</p>
+      <p class="dropzone__sub">またはクリックしてファイルを選択（.ppt形式は非対応）</p>
+      <input type="file" id="file-input" accept=".pptx" hidden />
+    </section>
+    <p id="parse-status" class="status" aria-live="polite"></p>
+
+    <section class="project-list-section">
+      <h2 class="section-heading">保存済みプロジェクト</h2>
+      <div id="project-list" class="project-list"></div>
+      <p id="project-list-empty" class="empty-state" hidden>
+        まだプロジェクトがありません。上の枠に .pptx をドロップして開始してください。
+      </p>
+    </section>
+  </main>
+
+  <!-- ============ 解析結果画面 ============ -->
+  <main id="screen-analysis" class="screen" hidden>
+    <button id="btn-back-home" class="btn btn--ghost">← ホームに戻る</button>
+
+    <section class="summary-bar">
+      <h2 id="analysis-project-name" class="section-heading"></h2>
+      <dl class="summary-stats">
+        <div><dt>スライド数</dt><dd id="stat-slide-count">–</dd></div>
+        <div><dt>抽出テキスト文字数</dt><dd id="stat-text-chars">–</dd></div>
+        <div><dt>画像数（重複除く）</dt><dd id="stat-image-count">–</dd></div>
+        <div><dt>温存対象スライド</dt><dd id="stat-preserve-count">–</dd></div>
+      </dl>
+      <div class="summary-actions">
+        <button id="btn-export-json" class="btn">解析結果をJSONで書き出す（検証用）</button>
+        <button id="btn-copy-hash" class="btn btn--ghost">デッキ全体のハッシュをコピー</button>
+      </div>
+    </section>
+
+    <section id="preserve-warning" class="preserve-warning" hidden>
+      <h3>元のまま温存されるスライド</h3>
+      <ul id="preserve-warning-list"></ul>
+      <p class="preserve-warning__note">
+        グラフ・SmartArt・埋め込みオブジェクト・動画・音声等を含むため、Phase 2以降でも元データをそのまま保持します。
+      </p>
+    </section>
+
+    <section class="slide-grid" id="slide-grid"></section>
+  </main>
+
+  <!-- ============ 確認モーダル ============ -->
+  <div class="modal-overlay" id="modal-overlay">
+    <div class="modal-box">
+      <p id="modal-message"></p>
+      <div class="modal-actions">
+        <button id="modal-btn-cancel" class="btn btn--ghost">キャンセル</button>
+        <button id="modal-btn-ok" class="btn btn--danger">削除する</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="libs/jszip.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  /* ============================================================
+   * 0. 名前空間 / 汎用XMLヘルパー
+   * ============================================================ */
+  const NS = {
+    p: "http://schemas.openxmlformats.org/presentationml/2006/main",
+    a: "http://schemas.openxmlformats.org/drawingml/2006/main",
+    r: "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    rel: "http://schemas.openxmlformats.org/package/2006/relationships",
+  };
+
+  function parseXmlText(text) {
+    const doc = new DOMParser().parseFromString(text, "application/xml");
+    const err = doc.getElementsByTagName("parsererror")[0];
+    if (err) throw new Error("XML解析エラー: " + err.textContent.slice(0, 200));
+    return doc;
+  }
+
+  function childrenNS(el, ns, local) {
+    if (!el) return [];
+    return Array.from(el.children).filter(
+      (c) => c.namespaceURI === ns && c.localName === local
+    );
+  }
+
+  function firstChildNS(el, ns, local) {
+    if (!el) return null;
+    for (const c of el.children) {
+      if (c.namespaceURI === ns && c.localName === local) return c;
+    }
+    return null;
+  }
+
+  function parseRelsXml(text) {
+    const doc = parseXmlText(text);
+    const rels = new Map();
+    for (const rel of Array.from(
+      doc.getElementsByTagNameNS(NS.rel, "Relationship")
+    )) {
+      rels.set(rel.getAttribute("Id"), rel.getAttribute("Target"));
+    }
+    return rels;
+  }
+
+  // "ppt/slides" + "../media/image1.png" -> "ppt/media/image1.png"
+  function resolvePath(baseDir, target) {
+    if (target.startsWith("/")) return target.slice(1);
+    const stack = baseDir.split("/").filter(Boolean);
+    for (const part of target.split("/")) {
+      if (part === "..") stack.pop();
+      else if (part === "." || part === "") continue;
+      else stack.push(part);
+    }
+    return stack.join("/");
+  }
+
+  function dirName(p) {
+    const i = p.lastIndexOf("/");
+    return i === -1 ? "" : p.slice(0, i);
+  }
+
+  function relsPathFor(partPath) {
+    const i = partPath.lastIndexOf("/");
+    const dir = partPath.slice(0, i);
+    const file = partPath.slice(i + 1);
+    return `${dir}/_rels/${file}.rels`;
+  }
+
+  function emuToIn(emu) {
+    return emu / 914400;
+  }
+
+  async function sha256Hex(input) {
+    const data =
+      typeof input === "string" ? new TextEncoder().encode(input) : input;
+    const digest = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  /* ============================================================
+   * 1. preserve（温存）検出
+   *    ─ 厳密なDOM解析ではなく、スライドXMLテキストへの部分文字列走査で行う。
+   *      名前空間接頭辞のゆれに影響されず、検出漏れのリスクが低いための
+   *      意図的な設計判断（実装引き継ぎ書 §4 参照）。
+   * ============================================================ */
+  function detectPreserve(xmlText) {
+    const reasons = [];
+    if (xmlText.includes("drawingml/2006/chart")) reasons.push("chart");
+    if (xmlText.includes("drawingml/2006/diagram")) reasons.push("smartart");
+    if (xmlText.includes("oleObject")) reasons.push("ole");
+    if (/<[a-zA-Z]*:?videoFile\b/.test(xmlText)) reasons.push("video");
+    if (
+      /<[a-zA-Z]*:?audioFile\b/.test(xmlText) ||
+      /<[a-zA-Z]*:?audioCd\b/.test(xmlText) ||
+      /<[a-zA-Z]*:?quickTimeFile\b/.test(xmlText)
+    ) {
+      reasons.push("audio");
+    }
+    return { preserve: reasons.length > 0, reasons };
+  }
+
+  const PRESERVE_LABELS = {
+    chart: "グラフ",
+    smartart: "SmartArt",
+    ole: "埋め込みオブジェクト",
+    video: "動画",
+    audio: "音声",
+  };
+
+  /* ============================================================
+   * 2. xfrm（位置・サイズ）読み取り & グループ変換
+   * ============================================================ */
+  function readOffExt(xfrmEl) {
+    if (!xfrmEl) return null;
+    const off = firstChildNS(xfrmEl, NS.a, "off");
+    const ext = firstChildNS(xfrmEl, NS.a, "ext");
+    if (!off || !ext) return null;
+    return {
+      xEmu: parseInt(off.getAttribute("x") || "0", 10),
+      yEmu: parseInt(off.getAttribute("y") || "0", 10),
+      cxEmu: parseInt(ext.getAttribute("cx") || "0", 10),
+      cyEmu: parseInt(ext.getAttribute("cy") || "0", 10),
+    };
+  }
+
+  function getSpXfrmRaw(spPr) {
+    // p:sp / p:pic: p:spPr > a:xfrm
+    const xfrm = firstChildNS(spPr, NS.a, "xfrm");
+    return readOffExt(xfrm);
+  }
+
+  /* ============================================================
+   * 3. テキスト抽出（段落・ラン）
+   * ============================================================ */
+  function extractColor(rPr) {
+    if (!rPr) return null;
+    const fill = firstChildNS(rPr, NS.a, "solidFill");
+    if (!fill) return null;
+    const srgb = firstChildNS(fill, NS.a, "srgbClr");
+    if (srgb) return "#" + srgb.getAttribute("val");
+    const scheme = firstChildNS(fill, NS.a, "schemeClr");
+    if (scheme) return "scheme:" + scheme.getAttribute("val");
+    return null;
+  }
+
+  function extractParagraphs(txBody) {
+    return childrenNS(txBody, NS.a, "p").map((p) => {
+      const pPr = firstChildNS(p, NS.a, "pPr");
+      const align = pPr ? pPr.getAttribute("algn") : null;
+      const runs = [];
+      for (const node of Array.from(p.children)) {
+        if (node.namespaceURI !== NS.a) continue;
+        if (node.localName === "r") {
+          const rPr = firstChildNS(node, NS.a, "rPr");
+          const tEl = firstChildNS(node, NS.a, "t");
+          runs.push({
+            text: tEl ? tEl.textContent : "",
+            bold: rPr ? rPr.getAttribute("b") === "1" : false,
+            italic: rPr ? rPr.getAttribute("i") === "1" : false,
+            underline: rPr
+              ? !!(rPr.getAttribute("u") && rPr.getAttribute("u") !== "none")
+              : false,
+            sizePt:
+              rPr && rPr.getAttribute("sz")
+                ? parseInt(rPr.getAttribute("sz"), 10) / 100
+                : null,
+            color: extractColor(rPr),
+          });
+        } else if (node.localName === "br") {
+          runs.push({ break: true });
+        } else if (node.localName === "fld") {
+          const tEl = firstChildNS(node, NS.a, "t");
+          runs.push({ text: tEl ? tEl.textContent : "", field: true });
+        }
+      }
+      return { align, runs };
+    });
+  }
+
+  function elementPlainText(e) {
+    if (e.type === "text") {
+      return e.paragraphs
+        .map((p) => p.runs.map((r) => (r.break ? "\n" : r.text || "")).join(""))
+        .join("\n");
+    }
+    if (e.type === "table") {
+      return e.rows.map((row) => row.join("\t")).join("\n");
+    }
+    return "";
+  }
+
+  /* ============================================================
+   * 4. 画像ロード（ハッシュベースの重複排除つき）
+   * ============================================================ */
+  const MIME_BY_EXT = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    bmp: "image/bmp",
+    svg: "image/svg+xml",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+  };
+
+  async function loadMedia(ctx, mediaPath) {
+    const file = ctx.zip.file(mediaPath);
+    if (!file) return null;
+    const buf = await file.async("arraybuffer");
+    const hashHex = await sha256Hex(buf);
+    const mediaId = "m_" + hashHex.slice(0, 16);
+    if (!ctx.mediaStore.has(mediaId)) {
+      const ext = (mediaPath.split(".").pop() || "").toLowerCase();
+      const mime = MIME_BY_EXT[ext] || "application/octet-stream";
+      ctx.mediaStore.set(mediaId, {
+        blob: new Blob([buf], { type: mime }),
+        mime,
+        byteHash: hashHex,
+        ext,
+      });
+    }
+    return { mediaId };
+  }
+
+  /* ============================================================
+   * 5. スライド内の図形ツリーを歩く（グループ座標変換つき）
+   * ============================================================ */
+  async function handleSp(spEl, mapFn, ctx) {
+    const spPr = firstChildNS(spEl, NS.p, "spPr");
+    const rawXfrm = spPr ? getSpXfrmRaw(spPr) : null;
+    const abs = rawXfrm ? mapFn(rawXfrm) : null;
+    const txBody = firstChildNS(spEl, NS.p, "txBody");
+    const paragraphs = txBody ? extractParagraphs(txBody) : [];
+    const hasText = paragraphs.some((p) =>
+      p.runs.some((r) => !r.break && r.text && r.text.trim() !== "")
+    );
+    if (!hasText) return; // 装飾のみの図形はPhase1では対象外（既知の限界）
+    ctx.elements.push({
+      type: "text",
+      origin: "source",
+      x: abs ? emuToIn(abs.xEmu) : null,
+      y: abs ? emuToIn(abs.yEmu) : null,
+      w: abs ? emuToIn(abs.cxEmu) : null,
+      h: abs ? emuToIn(abs.cyEmu) : null,
+      paragraphs,
+    });
+  }
+
+  async function handlePic(picEl, mapFn, ctx) {
+    const spPr = firstChildNS(picEl, NS.p, "spPr");
+    const rawXfrm = spPr ? getSpXfrmRaw(spPr) : null;
+    if (!rawXfrm) return; // 位置不明の画像はPhase1では対象外（既知の限界）
+    const abs = mapFn(rawXfrm);
+    const blipFill = firstChildNS(picEl, NS.p, "blipFill");
+    const blip = blipFill ? firstChildNS(blipFill, NS.a, "blip") : null;
+    const rId = blip ? blip.getAttributeNS(NS.r, "embed") : null;
+    if (!rId) return;
+    const target = ctx.slideRels.get(rId);
+    if (!target) return;
+    const mediaPath = resolvePath(ctx.basePathDir, target);
+    const media = await loadMedia(ctx, mediaPath);
+    if (!media) return;
+    ctx.elements.push({
+      type: "image",
+      origin: "source",
+      x: emuToIn(abs.xEmu),
+      y: emuToIn(abs.yEmu),
+      w: emuToIn(abs.cxEmu),
+      h: emuToIn(abs.cyEmu),
+      mediaId: media.mediaId,
+    });
+  }
+
+  async function handleGraphicFrame(gfEl, mapFn, ctx) {
+    const graphic = firstChildNS(gfEl, NS.a, "graphic");
+    const graphicData = graphic ? firstChildNS(graphic, NS.a, "graphicData") : null;
+    const uri = graphicData ? graphicData.getAttribute("uri") || "" : "";
+    if (!uri.endsWith("/table")) return; // chart/diagram/ole等はpreserveフラグ側で処理済み
+
+    const tbl = firstChildNS(graphicData, NS.a, "tbl");
+    if (!tbl) return;
+    const rows = childrenNS(tbl, NS.a, "tr").map((tr) =>
+      childrenNS(tr, NS.a, "tc").map((tc) => {
+        const txBody = firstChildNS(tc, NS.a, "txBody");
+        const paragraphs = txBody ? extractParagraphs(txBody) : [];
+        return paragraphs
+          .map((p) =>
+            p.runs
+              .filter((r) => !r.break)
+              .map((r) => r.text || "")
+              .join("")
+          )
+          .join("\n");
+      })
+    );
+    const xfrmEl = firstChildNS(gfEl, NS.p, "xfrm");
+    const rawXfrm = readOffExt(xfrmEl);
+    const abs = rawXfrm ? mapFn(rawXfrm) : null;
+    ctx.elements.push({
+      type: "table",
+      origin: "source",
+      x: abs ? emuToIn(abs.xEmu) : null,
+      y: abs ? emuToIn(abs.yEmu) : null,
+      w: abs ? emuToIn(abs.cxEmu) : null,
+      h: abs ? emuToIn(abs.cyEmu) : null,
+      rows,
+    });
+  }
+
+  async function handleGrpSp(grpEl, mapFn, ctx) {
+    const grpSpPr = firstChildNS(grpEl, NS.p, "grpSpPr");
+    const xfrmEl = grpSpPr ? firstChildNS(grpSpPr, NS.a, "xfrm") : null;
+    const rawGroupXfrm = xfrmEl ? readOffExt(xfrmEl) : null;
+    if (!xfrmEl || !rawGroupXfrm) {
+      await walkSpTree(grpEl, mapFn, ctx);
+      return;
+    }
+    const absGroup = mapFn(rawGroupXfrm);
+    const chOffEl = firstChildNS(xfrmEl, NS.a, "chOff");
+    const chExtEl = firstChildNS(xfrmEl, NS.a, "chExt");
+    const chOffX = chOffEl ? parseInt(chOffEl.getAttribute("x") || "0", 10) : rawGroupXfrm.xEmu;
+    const chOffY = chOffEl ? parseInt(chOffEl.getAttribute("y") || "0", 10) : rawGroupXfrm.yEmu;
+    const chExtCx = chExtEl ? parseInt(chExtEl.getAttribute("cx") || "0", 10) : rawGroupXfrm.cxEmu || 1;
+    const chExtCy = chExtEl ? parseInt(chExtEl.getAttribute("cy") || "0", 10) : rawGroupXfrm.cyEmu || 1;
+    const scaleX = chExtCx ? absGroup.cxEmu / chExtCx : 1;
+    const scaleY = chExtCy ? absGroup.cyEmu / chExtCy : 1;
+    const childMapFn = (raw) => ({
+      xEmu: absGroup.xEmu + (raw.xEmu - chOffX) * scaleX,
+      yEmu: absGroup.yEmu + (raw.yEmu - chOffY) * scaleY,
+      cxEmu: raw.cxEmu * scaleX,
+      cyEmu: raw.cyEmu * scaleY,
+    });
+    await walkSpTree(grpEl, childMapFn, ctx);
+  }
+
+  async function walkSpTree(spTreeEl, mapFn, ctx) {
+    for (const child of Array.from(spTreeEl.children)) {
+      if (child.namespaceURI !== NS.p) continue;
+      if (child.localName === "sp") await handleSp(child, mapFn, ctx);
+      else if (child.localName === "pic") await handlePic(child, mapFn, ctx);
+      else if (child.localName === "graphicFrame") await handleGraphicFrame(child, mapFn, ctx);
+      else if (child.localName === "grpSp") await handleGrpSp(child, mapFn, ctx);
+      // cxnSp（コネクタ線）等はPhase1では対象外
+    }
+  }
+
+  function getSpTree(doc) {
+    const sld = doc.documentElement;
+    const cSld = firstChildNS(sld, NS.p, "cSld");
+    return cSld ? firstChildNS(cSld, NS.p, "spTree") : null;
+  }
+
+  function isNotesBodyShape(sp) {
+    const nvSpPr = firstChildNS(sp, NS.p, "nvSpPr");
+    const nvPr = nvSpPr ? firstChildNS(nvSpPr, NS.p, "nvPr") : null;
+    const ph = nvPr ? firstChildNS(nvPr, NS.p, "ph") : null;
+    if (!ph) return true;
+    const type = ph.getAttribute("type");
+    return !type || type === "body";
+  }
+
+  async function extractNotes(zip, slideRels, basePathDir) {
+    for (const [, target] of slideRels) {
+      if (!target.includes("notesSlide")) continue;
+      const path = resolvePath(basePathDir, target);
+      const file = zip.file(path);
+      if (!file) continue;
+      const text = await file.async("text");
+      const doc = parseXmlText(text);
+      const spTree = getSpTree(doc);
+      if (!spTree) return "";
+      const lines = [];
+      for (const sp of childrenNS(spTree, NS.p, "sp").filter(isNotesBodyShape)) {
+        const txBody = firstChildNS(sp, NS.p, "txBody");
+        if (!txBody) continue;
+        for (const p of extractParagraphs(txBody)) {
+          lines.push(
+            p.runs
+              .filter((r) => !r.break)
+              .map((r) => r.text || "")
+              .join("")
+          );
+        }
+      }
+      return lines.join("\n");
+    }
+    return "";
+  }
+
+  /* ============================================================
+   * 6. スライド単位 / デッキ全体の解析
+   * ============================================================ */
+  async function parseOneSlide(zip, slidePath, index) {
+    const xmlText = await zip.file(slidePath).async("text");
+    const preserveInfo = detectPreserve(xmlText);
+    const doc = parseXmlText(xmlText);
+    const spTree = getSpTree(doc);
+    const relsPath = relsPathFor(slidePath);
+    const relsFile = zip.file(relsPath);
+    const slideRels = relsFile ? parseRelsXml(await relsFile.async("text")) : new Map();
+    const basePathDir = dirName(slidePath);
+
+    const ctx = { zip, slideRels, basePathDir, elements: [], mediaStore: new Map() };
+    if (spTree) await walkSpTree(spTree, (raw) => raw, ctx);
+    const notes = await extractNotes(zip, slideRels, basePathDir);
+
+    const textConcat = ctx.elements
+      .filter((e) => e.type === "text" || e.type === "table")
+      .map(elementPlainText)
+      .join("");
+
+    return {
+      index,
+      preserve: preserveInfo.preserve,
+      preserveReasons: preserveInfo.reasons,
+      notes,
+      elements: ctx.elements,
+      mediaStore: ctx.mediaStore,
+      textConcat,
+    };
+  }
+
+  async function parsePptx(file, onProgress) {
+    if (!/\.pptx$/i.test(file.name)) {
+      throw new Error(
+        "対応形式は .pptx のみです（.ppt形式は非対応）。PowerPointで開き直し" +
+          "「名前を付けて保存」で.pptx形式にしてから、再度お試しください。"
+      );
+    }
+    const buf = await file.arrayBuffer();
+    let zip;
+    try {
+      zip = await JSZip.loadAsync(buf);
+    } catch (e) {
+      throw new Error("ZIPとして開けませんでした。ファイルが壊れているか、.pptxではない可能性があります。");
+    }
+
+    const presXmlFile = zip.file("ppt/presentation.xml");
+    if (!presXmlFile) {
+      throw new Error("ppt/presentation.xml が見つかりません。有効な.pptxファイルか確認してください。");
+    }
+    const presDoc = parseXmlText(await presXmlFile.async("text"));
+    const presRelsFile = zip.file("ppt/_rels/presentation.xml.rels");
+    const presRels = presRelsFile
+      ? parseRelsXml(await presRelsFile.async("text"))
+      : new Map();
+
+    const sldSzEl = firstChildNS(presDoc.documentElement, NS.p, "sldSz");
+    const slideSizeEmu = sldSzEl
+      ? {
+          cx: parseInt(sldSzEl.getAttribute("cx") || "12192000", 10),
+          cy: parseInt(sldSzEl.getAttribute("cy") || "6858000", 10),
+        }
+      : { cx: 12192000, cy: 6858000 };
+
+    const sldIdLst = firstChildNS(presDoc.documentElement, NS.p, "sldIdLst");
+    const sldIdEls = sldIdLst ? childrenNS(sldIdLst, NS.p, "sldId") : [];
+    const orderedRIds = sldIdEls.map((el) => el.getAttributeNS(NS.r, "id"));
+
+    // 重要: ファイル名の数字順ではなく、必ずrels経由でスライド順を解決する
+    const slidePaths = orderedRIds.map((rid) => {
+      const target = presRels.get(rid);
+      if (!target) throw new Error(`スライドID(${rid})に対応するrelationshipが見つかりません。`);
+      return resolvePath("ppt", target);
+    });
+
+    const globalMediaStore = new Map();
+    const slides = [];
+    const slideTexts = [];
+    for (let i = 0; i < slidePaths.length; i++) {
+      const parsed = await parseOneSlide(zip, slidePaths[i], i);
+      for (const [mid, m] of parsed.mediaStore) {
+        if (!globalMediaStore.has(mid)) globalMediaStore.set(mid, m);
+      }
+      slideTexts.push(parsed.textConcat);
+      delete parsed.mediaStore;
+      slides.push(parsed);
+      if (onProgress) onProgress(i + 1, slidePaths.length);
+    }
+
+    for (let i = 0; i < slides.length; i++) {
+      slides[i].textHash = await sha256Hex(slideTexts[i]);
+    }
+    // デッキ全体ハッシュ: スライド境界を実テキストに出現しない制御文字で区切る
+    // （境界位置がズレて別内容が同一ハッシュになる事故を避けるため）
+    const deckHash = await sha256Hex(slideTexts.join("\u0000"));
+
+    return {
+      slideSizeEmu,
+      slides,
+      mediaStore: globalMediaStore,
+      deckHash,
+      slideCount: slides.length,
+    };
+  }
+
+  /* ============================================================
+   * 7. IndexedDB
+   * ============================================================ */
+  const DB_NAME = "slide-brushup";
+  const DB_VERSION = 1;
+  let dbPromise = null;
+
+  function openDb() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains("projects")) {
+          db.createObjectStore("projects", { keyPath: "id" });
+        }
+        if (!db.objectStoreNames.contains("slides")) {
+          db.createObjectStore("slides", { keyPath: ["projectId", "index"] });
+        }
+        if (!db.objectStoreNames.contains("media")) {
+          db.createObjectStore("media", { keyPath: ["projectId", "mediaId"] });
+        }
+        if (!db.objectStoreNames.contains("aiLog")) {
+          db.createObjectStore("aiLog", { keyPath: "id", autoIncrement: true });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return dbPromise;
+  }
+
+  function reqToPromise(req) {
+    return new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function idbTx(storeNames, mode) {
+    const db = await openDb();
+    return db.transaction(storeNames, mode);
+  }
+
+  function txDone(tx) {
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  async function idbPut(storeName, value) {
+    const tx = await idbTx([storeName], "readwrite");
+    tx.objectStore(storeName).put(value);
+    await txDone(tx);
+  }
+
+  async function idbPutMany(storeName, values) {
+    const tx = await idbTx([storeName], "readwrite");
+    const store = tx.objectStore(storeName);
+    for (const v of values) store.put(v);
+    await txDone(tx);
+  }
+
+  async function idbGetAll(storeName) {
+    const tx = await idbTx([storeName], "readonly");
+    return reqToPromise(tx.objectStore(storeName).getAll());
+  }
+
+  async function idbGet(storeName, key) {
+    const tx = await idbTx([storeName], "readonly");
+    return reqToPromise(tx.objectStore(storeName).get(key));
+  }
+
+  async function idbGetSlidesForProject(projectId) {
+    const tx = await idbTx(["slides"], "readonly");
+    const range = IDBKeyRange.bound([projectId, -Infinity], [projectId, Infinity]);
+    const result = await reqToPromise(tx.objectStore("slides").getAll(range));
+    result.sort((a, b) => a.index - b.index);
+    return result;
+  }
+
+  async function idbGetMediaForProject(projectId) {
+    const tx = await idbTx(["media"], "readonly");
+    // 文字列キーの上限として配列型(String型より大きい)を使う定石
+    const range = IDBKeyRange.bound([projectId, ""], [projectId, []]);
+    return reqToPromise(tx.objectStore("media").getAll(range));
+  }
+
+  async function idbDeleteRangeForProject(storeName, projectId, low, high) {
+    const tx = await idbTx([storeName], "readwrite");
+    const store = tx.objectStore(storeName);
+    const range = IDBKeyRange.bound([projectId, low], [projectId, high]);
+    await new Promise((resolve, reject) => {
+      const cursorReq = store.openCursor(range);
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+        } else resolve();
+      };
+      cursorReq.onerror = () => reject(cursorReq.error);
+    });
+    await txDone(tx);
+  }
+
+  async function deleteProject(projectId) {
+    await idbDeleteRangeForProject("slides", projectId, -Infinity, Infinity);
+    await idbDeleteRangeForProject("media", projectId, "", []);
+    const tx = await idbTx(["projects"], "readwrite");
+    tx.objectStore("projects").delete(projectId);
+    await txDone(tx);
+  }
+
+  async function listProjects() {
+    const all = await idbGetAll("projects");
+    all.sort((a, b) => b.updatedAt - a.updatedAt);
+    return all;
+  }
+
+  async function saveNewProject(file, parseResult) {
+    const id = crypto.randomUUID();
+    const now = Date.now();
+    const preserveCount = parseResult.slides.filter((s) => s.preserve).length;
+    const totalTextChars = parseResult.slides.reduce(
+      (sum, s) => sum + (s.textConcat ? s.textConcat.length : 0),
+      0
+    );
+    const project = {
+      id,
+      name: file.name.replace(/\.pptx$/i, ""),
+      createdAt: now,
+      updatedAt: now,
+      phase: 1,
+      sourceFileName: file.name,
+      slideSize: {
+        cxEmu: parseResult.slideSizeEmu.cx,
+        cyEmu: parseResult.slideSizeEmu.cy,
+        wIn: emuToIn(parseResult.slideSizeEmu.cx),
+        hIn: emuToIn(parseResult.slideSizeEmu.cy),
+      },
+      slideCount: parseResult.slideCount,
+      preserveCount,
+      totalTextChars,
+      deckHash: parseResult.deckHash,
+    };
+    await idbPut("projects", project);
+
+    const slideRecords = parseResult.slides.map((s) => ({ ...s, projectId: id }));
+    await idbPutMany("slides", slideRecords);
+
+    const mediaRecords = [];
+    for (const [mediaId, m] of parseResult.mediaStore) {
+      mediaRecords.push({
+        projectId: id,
+        mediaId,
+        blob: m.blob,
+        mime: m.mime,
+        byteHash: m.byteHash,
+        ext: m.ext,
+      });
+    }
+    await idbPutMany("media", mediaRecords);
+
+    return id;
+  }
+
+  /* ============================================================
+   * 8. UI: 汎用ヘルパー
+   * ============================================================ */
+  const $ = (id) => document.getElementById(id);
+
+  function setStatus(text, kind) {
+    const el = $("parse-status");
+    el.textContent = text || "";
+    el.classList.remove("is-error", "is-success");
+    if (kind) el.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  function openConfirmModal(message) {
+    return new Promise((resolve) => {
+      const overlay = $("modal-overlay");
+      $("modal-message").textContent = message;
+      overlay.classList.add("is-open");
+      const btnOk = $("modal-btn-ok");
+      const btnCancel = $("modal-btn-cancel");
+      function cleanup(result) {
+        overlay.classList.remove("is-open");
+        btnOk.removeEventListener("click", onOk);
+        btnCancel.removeEventListener("click", onCancel);
+        resolve(result);
+      }
+      function onOk() {
+        cleanup(true);
+      }
+      function onCancel() {
+        cleanup(false);
+      }
+      btnOk.addEventListener("click", onOk);
+      btnCancel.addEventListener("click", onCancel);
+    });
+  }
+
+  function showScreen(name) {
+    $("screen-home").hidden = name !== "home";
+    $("screen-analysis").hidden = name !== "analysis";
+  }
+
+  /* ============================================================
+   * 9. UI: ホーム画面（プロジェクト一覧・インポート）
+   * ============================================================ */
+  async function refreshProjectList() {
+    const projects = await listProjects();
+    const listEl = $("project-list");
+    const emptyEl = $("project-list-empty");
+    listEl.innerHTML = "";
+    emptyEl.hidden = projects.length > 0;
+    for (const p of projects) {
+      const card = document.createElement("div");
+      card.className = "project-card";
+      const updated = new Date(p.updatedAt).toLocaleString("ja-JP");
+      card.innerHTML = `
+        <p class="project-card__name">${escapeHtml(p.name)}</p>
+        <p class="project-card__meta">
+          スライド${p.slideCount}枚 ／ 温存${p.preserveCount}枚<br>
+          更新: ${updated}
+        </p>
+        <div class="project-card__actions">
+          <button class="btn btn--small btn-open">開く</button>
+          <button class="btn btn--small btn--ghost btn-delete">削除</button>
+        </div>
+      `;
+      card.querySelector(".btn-open").addEventListener("click", () => openProject(p.id));
+      card.querySelector(".btn-delete").addEventListener("click", async () => {
+        const ok = await openConfirmModal(
+          `プロジェクト「${p.name}」を削除します。この操作は取り消せません。よろしいですか？`
+        );
+        if (!ok) return;
+        await deleteProject(p.id);
+        await refreshProjectList();
+      });
+      listEl.appendChild(card);
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  async function handleFileImport(file) {
+    if (!file) return;
+    setStatus(`解析中... 「${file.name}」`, null);
+    try {
+      const result = await parsePptx(file, (done, total) => {
+        setStatus(`解析中... ${done}/${total} 枚`, null);
+      });
+      const id = await saveNewProject(file, result);
+      setStatus(`解析が完了しました（${result.slideCount}枚）。`, "success");
+      await refreshProjectList();
+      await openProject(id);
+    } catch (e) {
+      console.error(e);
+      setStatus("解析に失敗しました: " + e.message, "error");
+    }
+  }
+
+  function setupDropzone() {
+    const zone = $("dropzone");
+    const input = $("file-input");
+    zone.addEventListener("click", () => input.click());
+    zone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") input.click();
+    });
+    ["dragenter", "dragover"].forEach((evt) =>
+      zone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        zone.classList.add("is-dragover");
+      })
+    );
+    ["dragleave", "drop"].forEach((evt) =>
+      zone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        zone.classList.remove("is-dragover");
+      })
+    );
+    zone.addEventListener("drop", (e) => {
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      handleFileImport(file);
+    });
+    input.addEventListener("change", () => {
+      handleFileImport(input.files[0]);
+      input.value = "";
+    });
+  }
+
+  /* ============================================================
+   * 10. UI: 解析結果画面（サムネイル・検証情報）
+   * ============================================================ */
+  const THUMB_W = 260;
+
+  function renderThumb(container, slideSize, slide, mediaUrlMap) {
+    const scale = THUMB_W / slideSize.wIn;
+    const thumbH = slideSize.hIn * scale;
+    container.style.width = THUMB_W + "px";
+    container.style.height = thumbH + "px";
+    container.innerHTML = "";
+    for (const el of slide.elements) {
+      if (el.x == null) continue; // 位置不明の要素は表示のみスキップ（データは保持済み）
+      const box = document.createElement("div");
+      box.className = "thumb-el thumb-el--" + el.type;
+      box.style.left = el.x * scale + "px";
+      box.style.top = el.y * scale + "px";
+      box.style.width = Math.max(2, el.w * scale) + "px";
+      box.style.height = Math.max(2, el.h * scale) + "px";
+      if (el.type === "text") {
+        box.textContent = elementPlainText(el).slice(0, 80);
+      } else if (el.type === "image") {
+        const url = mediaUrlMap.get(el.mediaId);
+        if (url) {
+          const img = document.createElement("img");
+          img.src = url;
+          img.alt = "";
+          img.loading = "lazy";
+          box.appendChild(img);
+        } else {
+          box.textContent = "[画像: プレビュー非対応形式]";
+          box.classList.add("thumb-el--unsupported-img");
+        }
+      } else if (el.type === "table") {
+        box.textContent = "[表: " + el.rows.length + "行]";
+      }
+      container.appendChild(box);
+    }
+    if (slide.preserve) {
+      const badge = document.createElement("div");
+      badge.className = "thumb-preserve-badge";
+      badge.textContent = "温存対象";
+      container.appendChild(badge);
+    }
+  }
+
+  async function openProject(projectId) {
+    const project = await idbGet("projects", projectId);
+    if (!project) return;
+    const slides = await idbGetSlidesForProject(projectId);
+    const mediaRecords = await idbGetMediaForProject(projectId);
+
+    const mediaUrlMap = new Map();
+    for (const m of mediaRecords) {
+      if (m.mime && m.mime.startsWith("image/") && m.mime !== "image/tiff") {
+        mediaUrlMap.set(m.mediaId, URL.createObjectURL(m.blob));
+      }
+    }
+
+    $("analysis-project-name").textContent = project.name;
+    $("stat-slide-count").textContent = project.slideCount;
+    $("stat-text-chars").textContent = project.totalTextChars.toLocaleString("ja-JP");
+    $("stat-image-count").textContent = mediaRecords.length;
+    $("stat-preserve-count").textContent = project.preserveCount;
+
+    const warnSection = $("preserve-warning");
+    const warnList = $("preserve-warning-list");
+    warnList.innerHTML = "";
+    const preserved = slides.filter((s) => s.preserve);
+    warnSection.hidden = preserved.length === 0;
+    for (const s of preserved) {
+      const li = document.createElement("li");
+      const reasons = s.preserveReasons.map((r) => PRESERVE_LABELS[r] || r).join("・");
+      li.textContent = `スライド ${s.index + 1}: ${reasons}`;
+      warnList.appendChild(li);
+    }
+
+    const grid = $("slide-grid");
+    grid.innerHTML = "";
+    for (const s of slides) {
+      const card = document.createElement("div");
+      card.className = "slide-card";
+
+      const idxLine = document.createElement("p");
+      idxLine.className = "slide-card__index";
+      idxLine.innerHTML = `<span>スライド ${s.index + 1}</span>`;
+      card.appendChild(idxLine);
+
+      const canvas = document.createElement("div");
+      canvas.className = "slide-canvas";
+      renderThumb(canvas, project.slideSize, s, mediaUrlMap);
+      card.appendChild(canvas);
+
+      const imgCount = s.elements.filter((e) => e.type === "image").length;
+      const stats = document.createElement("p");
+      stats.className = "slide-card__stats";
+      stats.textContent = `テキスト${s.textConcat.length}文字 ／ 画像${imgCount}点${
+        s.notes ? " ／ ノートあり" : ""
+      }`;
+      card.appendChild(stats);
+
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = "テキストを確認";
+      details.appendChild(summary);
+      const pre = document.createElement("pre");
+      pre.textContent =
+        (s.textConcat || "（テキストなし）") +
+        (s.notes ? "\n\n― 発表者ノート ―\n" + s.notes : "");
+      details.appendChild(pre);
+      card.appendChild(details);
+
+      grid.appendChild(card);
+    }
+
+    $("btn-export-json").onclick = () => exportDebugJson(project, slides, mediaRecords);
+    $("btn-copy-hash").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(project.deckHash);
+        setAnalysisStatus("デッキ全体のハッシュをコピーしました。");
+      } catch {
+        setAnalysisStatus("コピーに失敗しました。手動でJSON書き出しをご利用ください。");
+      }
+    };
+
+    showScreen("analysis");
+  }
+
+  function setAnalysisStatus(text) {
+    // 簡易トースト代わり: 一時的にボタン行の下へ差し込む
+    let el = document.getElementById("analysis-toast");
+    if (!el) {
+      el = document.createElement("p");
+      el.id = "analysis-toast";
+      el.className = "status is-success";
+      $("screen-analysis").insertBefore(el, $("preserve-warning"));
+    }
+    el.textContent = text;
+    setTimeout(() => {
+      if (el) el.textContent = "";
+    }, 3000);
+  }
+
+  function exportDebugJson(project, slides, mediaRecords) {
+    const debugObj = {
+      project: { ...project },
+      slides: slides.map((s) => ({
+        index: s.index,
+        preserve: s.preserve,
+        preserveReasons: s.preserveReasons,
+        notes: s.notes,
+        textHash: s.textHash,
+        textLength: s.textConcat ? s.textConcat.length : 0,
+        textConcat: s.textConcat,
+        elements: s.elements,
+      })),
+      media: mediaRecords.map((m) => ({
+        mediaId: m.mediaId,
+        mime: m.mime,
+        byteHash: m.byteHash,
+        ext: m.ext,
+        sizeBytes: m.blob ? m.blob.size : null,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(debugObj, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (project.name || "project") + "_解析結果.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  /* ============================================================
+   * 11. 起動
+   * ============================================================ */
+  function init() {
+    if (typeof JSZip === "undefined") {
+      setStatus(
+        "libs/jszip.min.js が読み込めていません。実装引き継ぎ書 §3 の手順で" +
+          " libs フォルダを配置してください。",
+        "error"
+      );
+      return;
+    }
+    setupDropzone();
+    $("btn-back-home").addEventListener("click", () => {
+      showScreen("home");
+      refreshProjectList();
+    });
+    refreshProjectList();
+    showScreen("home");
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+})();
+</script>
+</body>
+</html>

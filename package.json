@@ -1,0 +1,12 @@
+{
+  "name": "slide-brushup-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "スライドブラッシュアップ工房のPlaywright回帰テスト用設定（アプリ本体はビルド不要のindex.html単体で動作）",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "basic.pptx": {
+    "slideCount": 3,
+    "titlesInOrder": [
+      "フィクスチャC",
+      "フィクスチャB",
+      "フィクスチャA"
+    ],
+    "note": "ファイル名(slide1/2/3.xml)は元のA,B,C順のままだが、sldIdLstの並びをC,B,Aに変更してある。rels経由で解決すればC,B,A、ファイル名ソートで誤解決するとA,B,Cになる。"
+  },
+  "image.pptx": {
+    "slideCount": 2,
+    "imageSha256": "243b1a16004a0324bef545f9b27f31f9820380f93519d2f2c60e76670d5cff7a",
+    "note": "2枚のスライドが同一画像を参照する（重複排除の確認にも使える）。"
+  },
+  "preserve.pptx": {
+    "slideCount": 4,
+    "expectedPreserve": [
+      {
+        "index": 0,
+        "preserve": true,
+        "reason": "chart"
+      },
+      {
+        "index": 1,
+        "preserve": false,
+        "reason": null,
+        "note": "表は再構築対象のため温存不要"
+      },
+      {
+        "index": 2,
+        "preserve": false,
+        "reason": null
+      },
+      {
+        "index": 3,
+        "preserve": true,
+        "reason": "smartart"
+      }
+    ]
+  }
+}

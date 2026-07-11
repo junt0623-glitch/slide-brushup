@@ -217,10 +217,108 @@ def build_preserve():
     return path
 
 
+def build_shapes():
+    """図形ツールの認識を検証するための構成。
+    4つ目の図形は塗りを明示指定しない＝PowerPointの図形ツールで作ったままの状態
+    （<p:style>のテーマ参照のみ）。これがユーザー報告の「図形が全て消える」不具合の
+    再現ケースであり、テーマ色解決の回帰テストを兼ねる。"""
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.dml.color import RGBColor
+
+    prs = _new_prs()
+    layout = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(layout)
+
+    r1 = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(2), Inches(1))
+    r1.fill.solid()
+    r1.fill.fore_color.rgb = RGBColor(0x1A, 0x7A, 0x5E)
+    r1.line.color.rgb = RGBColor(0x00, 0x00, 0x00)
+    r1.line.width = Pt(2)
+
+    a1 = slide.shapes.add_shape(MSO_SHAPE.RIGHT_ARROW, Inches(4), Inches(1), Inches(1.5), Inches(0.8))
+    a1.fill.solid()
+    a1.fill.fore_color.rgb = RGBColor(0xC0, 0x8A, 0x3E)
+
+    r2 = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1), Inches(3), Inches(3), Inches(1))
+    r2.fill.solid()
+    r2.fill.fore_color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
+    r2.text_frame.text = "ラベル付き図形"
+
+    # 塗り未指定 = テーマスタイル参照のみ（accent1 = 4F81BD が期待値）
+    slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(5), Inches(3), Inches(1.5), Inches(1.5))
+
+    path = os.path.join(OUT, "shapes.pptx")
+    prs.save(path)
+    return path
+
+
+ANIM_TIMING_STUB = (
+    "<p:timing><p:tnLst><p:par>"
+    '<p:cTn id="1" dur="indefinite" restart="never" nodeType="tmRoot">'
+    "<p:childTnLst><p:seq concurrent=\"1\" nextAc=\"seek\">"
+    '<p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>'
+    '<p:par><p:cTn id="3" fill="hold"><p:childTnLst>'
+    '<p:par><p:cTn id="4" fill="hold"><p:childTnLst>'
+    '<p:par><p:cTn id="5" presetID="1" presetClass="entr" presetSubtype="0" fill="hold" nodeType="clickEffect">'
+    "<p:childTnLst>"
+    '<p:set><p:cBhvr><p:cTn id="6" dur="1" fill="hold"/>'
+    '<p:tgtEl><p:spTgt spid="2"/></p:tgtEl>'
+    "<p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr>"
+    "<p:to><p:strVal val=\"visible\"/></p:to></p:set>"
+    "</p:childTnLst></p:cTn></p:par>"
+    "</p:childTnLst></p:cTn></p:par>"
+    "</p:childTnLst></p:cTn></p:par>"
+    "</p:childTnLst></p:cTn></p:seq></p:childTnLst>"
+    "</p:cTn></p:par></p:tnLst></p:timing>"
+)
+
+
+def build_anim():
+    """アニメーション・画面切り替えの検出/引き継ぎ検証用。
+    python-pptxはアニメーション生成に非対応のため、実際のPowerPointが出力する
+    形式に沿ったXML断片をスライドへ直接注入する。
+      slide1: アニメーションあり（温存の初期値=ONになるはず）
+      slide2: 画面切り替えのみ（再構築されても切り替えは引き継がれるはず）
+      slide3: どちらもなし（対照群）
+    """
+    prs = _new_prs()
+    layout = prs.slide_layouts[6]
+    for label in ("アニメーション付きスライド", "画面切り替え付きスライド", "効果なしスライド"):
+        s = prs.slides.add_slide(layout)
+        tb = s.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(8), Inches(1))
+        tb.text_frame.text = label
+    path = os.path.join(OUT, "anim.pptx")
+    prs.save(path)
+
+    def mutate(data):
+        # slide1: timing(アニメーション)を注入
+        xml1 = data["ppt/slides/slide1.xml"].decode("utf-8")
+        assert "</p:sld>" in xml1
+        data["ppt/slides/slide1.xml"] = xml1.replace(
+            "</p:sld>", ANIM_TIMING_STUB + "</p:sld>"
+        ).encode("utf-8")
+        # slide2: transition(画面切り替え・フェード)を注入
+        xml2 = data["ppt/slides/slide2.xml"].decode("utf-8")
+        data["ppt/slides/slide2.xml"] = xml2.replace(
+            "</p:sld>", '<p:transition spd="slow"><p:fade/></p:transition></p:sld>'
+        ).encode("utf-8")
+
+    _rewrite_zip(path, mutate)
+
+    # 注入後のXMLが妥当であることを確認（DOMParser相当）
+    import xml.etree.ElementTree as ET
+    with zipfile.ZipFile(path) as z:
+        for n in ("ppt/slides/slide1.xml", "ppt/slides/slide2.xml"):
+            ET.fromstring(z.read(n).decode("utf-8"))
+    return path
+
+
 def main():
     build_basic()
     _img_path, img_hash = build_image()
     build_preserve()
+    build_shapes()
+    build_anim()
 
     expectations = {
         "basic.pptx": {
@@ -248,7 +346,7 @@ def main():
     with open(os.path.join(OUT, "expectations.json"), "w", encoding="utf-8") as f:
         json.dump(expectations, f, ensure_ascii=False, indent=2)
 
-    for name in ("basic.pptx", "image.pptx", "preserve.pptx", "expectations.json"):
+    for name in ("basic.pptx", "image.pptx", "preserve.pptx", "shapes.pptx", "anim.pptx", "expectations.json"):
         p = os.path.join(OUT, name)
         print(f"{name}: {os.path.getsize(p)} bytes")
 

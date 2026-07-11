@@ -200,6 +200,22 @@
   .preserve-warning ul { margin: 0 0 8px; padding-left: 20px; font-size: 0.85rem; }
   .preserve-warning__note { margin: 0; font-size: 0.78rem; color: var(--color-ink-soft); }
 
+  .build-result {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    font-size: 0.85rem;
+  }
+  .build-result h3 { margin: 0 0 10px; font-size: 0.9rem; }
+  .verify-list { list-style: none; margin: 0 0 10px; padding: 0; }
+  .verify-list li { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .verify-badge { font-weight: 700; }
+  .verify-badge.ok { color: var(--color-celadon-dark); }
+  .verify-badge.ng { color: var(--color-danger); }
+  .build-warnings { margin: 10px 0 0; padding-left: 20px; font-size: 0.78rem; color: var(--color-amber); }
+
   /* --- スライドグリッド / サムネイル --- */
   .slide-grid {
     display: grid;
@@ -240,6 +256,7 @@
     padding: 1px 2px;
   }
   .thumb-el--text { border: 1px dotted #cbd3ce; }
+  .thumb-el--shape { border: 1px solid #d8cdb8; box-sizing: border-box; }
   .thumb-el--table { border: 1px dashed var(--color-clay); background: #faf6f0; font-size: 6px; }
   .thumb-el--image img { width: 100%; height: 100%; object-fit: contain; display: block; }
   .thumb-el--unsupported-img {
@@ -336,9 +353,12 @@
         <div><dt>温存対象スライド</dt><dd id="stat-preserve-count">–</dd></div>
       </dl>
       <div class="summary-actions">
-        <button id="btn-export-json" class="btn">解析結果をJSONで書き出す（検証用）</button>
+        <button id="btn-build-output" class="btn">pptxを書き出す（Phase 2）</button>
+        <button id="btn-export-json" class="btn btn--ghost">解析結果をJSONで書き出す（検証用）</button>
         <button id="btn-copy-hash" class="btn btn--ghost">デッキ全体のハッシュをコピー</button>
       </div>
+      <p id="build-status" class="status" aria-live="polite"></p>
+      <div id="build-result" class="build-result" hidden></div>
     </section>
 
     <section id="preserve-warning" class="preserve-warning" hidden>
@@ -366,6 +386,7 @@
 </div>
 
 <script src="libs/jszip.min.js"></script>
+<script src="libs/pptxgen.min.js"></script>
 <script>
 (function () {
   "use strict";
@@ -488,11 +509,13 @@
     const off = firstChildNS(xfrmEl, NS.a, "off");
     const ext = firstChildNS(xfrmEl, NS.a, "ext");
     if (!off || !ext) return null;
+    const rotAttr = xfrmEl.getAttribute("rot");
     return {
       xEmu: parseInt(off.getAttribute("x") || "0", 10),
       yEmu: parseInt(off.getAttribute("y") || "0", 10),
       cxEmu: parseInt(ext.getAttribute("cx") || "0", 10),
       cyEmu: parseInt(ext.getAttribute("cy") || "0", 10),
+      rotDeg: rotAttr ? parseInt(rotAttr, 10) / 60000 : 0,
     };
   }
 
@@ -551,8 +574,8 @@
   }
 
   function elementPlainText(e) {
-    if (e.type === "text") {
-      return e.paragraphs
+    if (e.type === "text" || e.type === "shape") {
+      return (e.paragraphs || [])
         .map((p) => p.runs.map((r) => (r.break ? "\n" : r.text || "")).join(""))
         .join("\n");
     }
@@ -598,23 +621,66 @@
   /* ============================================================
    * 5. スライド内の図形ツリーを歩く（グループ座標変換つき）
    * ============================================================ */
-  async function handleSp(spEl, mapFn, ctx) {
+  function extractFillAndLine(spPr) {
+    if (!spPr) return { fill: null, line: null };
+    let fill = null;
+    const solidFill = firstChildNS(spPr, NS.a, "solidFill");
+    const noFill = firstChildNS(spPr, NS.a, "noFill");
+    if (solidFill) {
+      const srgb = firstChildNS(solidFill, NS.a, "srgbClr");
+      const scheme = firstChildNS(solidFill, NS.a, "schemeClr");
+      fill = { type: "solid", color: srgb ? "#" + srgb.getAttribute("val") : scheme ? "scheme:" + scheme.getAttribute("val") : null };
+    } else if (noFill) {
+      fill = { type: "none" };
+    }
+    let line = null;
+    const ln = firstChildNS(spPr, NS.a, "ln");
+    if (ln) {
+      const lnFill = firstChildNS(ln, NS.a, "solidFill");
+      const lnNoFill = firstChildNS(ln, NS.a, "noFill");
+      if (lnFill) {
+        const srgb = firstChildNS(lnFill, NS.a, "srgbClr");
+        const scheme = firstChildNS(lnFill, NS.a, "schemeClr");
+        const widthEmu = ln.getAttribute("w");
+        line = {
+          color: srgb ? "#" + srgb.getAttribute("val") : scheme ? "scheme:" + scheme.getAttribute("val") : null,
+          widthPt: widthEmu ? Math.round((parseInt(widthEmu, 10) / 12700) * 100) / 100 : null,
+        };
+      } else if (lnNoFill) {
+        line = { color: null, widthPt: null, none: true };
+      }
+    }
+    return { fill, line };
+  }
+
+  function getPrstGeom(spPr) {
+    if (!spPr) return "rect";
+    const geom = firstChildNS(spPr, NS.a, "prstGeom");
+    return geom ? geom.getAttribute("prst") || "rect" : "rect";
+  }
+
+  // p:sp (図形/テキストボックス) と p:cxnSp (コネクタ線) は、OOXML上ほぼ同じ構造を持つ。
+  // Phase 1では「テキストを持つ図形」しか要素化していなかったが、装飾用の矩形・矢印・
+  // コネクタ線などテキストを持たない図形もブラッシュアップ対象として認識する（ユーザー指摘対応）。
+  async function handleShapeLike(spEl, mapFn, ctx, isConnector) {
     const spPr = firstChildNS(spEl, NS.p, "spPr");
     const rawXfrm = spPr ? getSpXfrmRaw(spPr) : null;
     const abs = rawXfrm ? mapFn(rawXfrm) : null;
-    const txBody = firstChildNS(spEl, NS.p, "txBody");
+    const txBody = isConnector ? null : firstChildNS(spEl, NS.p, "txBody");
     const paragraphs = txBody ? extractParagraphs(txBody) : [];
-    const hasText = paragraphs.some((p) =>
-      p.runs.some((r) => !r.break && r.text && r.text.trim() !== "")
-    );
-    if (!hasText) return; // 装飾のみの図形はPhase1では対象外（既知の限界）
+    const { fill, line } = extractFillAndLine(spPr);
+    const shapeType = isConnector ? "line" : getPrstGeom(spPr);
     ctx.elements.push({
-      type: "text",
+      type: "shape",
       origin: "source",
       x: abs ? emuToIn(abs.xEmu) : null,
       y: abs ? emuToIn(abs.yEmu) : null,
       w: abs ? emuToIn(abs.cxEmu) : null,
       h: abs ? emuToIn(abs.cyEmu) : null,
+      rotDeg: abs ? abs.rotDeg || (rawXfrm ? rawXfrm.rotDeg : 0) : 0,
+      shapeType,
+      fill,
+      line,
       paragraphs,
     });
   }
@@ -709,11 +775,11 @@
   async function walkSpTree(spTreeEl, mapFn, ctx) {
     for (const child of Array.from(spTreeEl.children)) {
       if (child.namespaceURI !== NS.p) continue;
-      if (child.localName === "sp") await handleSp(child, mapFn, ctx);
+      if (child.localName === "sp") await handleShapeLike(child, mapFn, ctx, false);
+      else if (child.localName === "cxnSp") await handleShapeLike(child, mapFn, ctx, true);
       else if (child.localName === "pic") await handlePic(child, mapFn, ctx);
       else if (child.localName === "graphicFrame") await handleGraphicFrame(child, mapFn, ctx);
       else if (child.localName === "grpSp") await handleGrpSp(child, mapFn, ctx);
-      // cxnSp（コネクタ線）等はPhase1では対象外
     }
   }
 
@@ -778,12 +844,13 @@
     const notes = await extractNotes(zip, slideRels, basePathDir);
 
     const textConcat = ctx.elements
-      .filter((e) => e.type === "text" || e.type === "table")
+      .filter((e) => e.type === "text" || e.type === "shape" || e.type === "table")
       .map(elementPlainText)
       .join("");
 
     return {
       index,
+      sourcePath: slidePath,
       preserve: preserveInfo.preserve,
       preserveReasons: preserveInfo.reasons,
       notes,
@@ -864,6 +931,475 @@
       mediaStore: globalMediaStore,
       deckHash,
       slideCount: slides.length,
+      sourceArrayBuffer: buf,
+    };
+  }
+
+  /* ============================================================
+   * 6.5. 出力エンジン（Phase 2）
+   *   ・非温存スライド: elements[] から PptxGenJS でスライドを再構築
+   *   ・温存スライド: 元zipのパーツをZIPレベルでそのままコピー注入
+   *   ・書き出し後、同じ解析ロジックで再パースし、テキスト/画像の
+   *     無改変性を実測で検証する（申告ではなく実行結果で確認する方針）
+   * ============================================================ */
+
+  const CONTENT_TYPES_PATH = "[Content_Types].xml";
+  const CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types";
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // OOXML prst名 → PptxGenJS ShapeType名 の変換（大半はそのまま通じる設計になっている）
+  // 注意: ShapeType は PptxGenJS のインスタンスプロパティ（クラス静的プロパティではない）
+  function toPptxGenShapeType(pgPptx, prst) {
+    if (prst && pgPptx.ShapeType && pgPptx.ShapeType[prst]) return pgPptx.ShapeType[prst];
+    return pgPptx.ShapeType.rect;
+  }
+
+  function pgColor(colorStr) {
+    // "#RRGGBB" -> "RRGGBB"。schemeカラーや未解決値はnullを返しPptxGenJS既定にフォールバック
+    if (!colorStr || typeof colorStr !== "string") return null;
+    if (colorStr.startsWith("#")) return colorStr.slice(1).toUpperCase();
+    return null;
+  }
+
+  function buildRunsForAddText(paragraphs) {
+    // PptxGenJSのaddTextは「配列の各要素が1ラン、breakLine:trueで改行」という表現。
+    // 元の段落構造をできるだけ再現する。
+    const out = [];
+    for (let pi = 0; pi < paragraphs.length; pi++) {
+      const p = paragraphs[pi];
+      const runs = p.runs.filter((r) => !r.break);
+      if (runs.length === 0) {
+        out.push({ text: "", options: { breakLine: true } });
+        continue;
+      }
+      for (let ri = 0; ri < runs.length; ri++) {
+        const r = runs[ri];
+        const isLastRunOfParagraph = ri === runs.length - 1;
+        const opts = {};
+        if (r.bold) opts.bold = true;
+        if (r.italic) opts.italic = true;
+        if (r.underline) opts.underline = true;
+        if (r.sizePt) opts.fontSize = r.sizePt;
+        const c = pgColor(r.color);
+        if (c) opts.color = c;
+        if (isLastRunOfParagraph && pi < paragraphs.length - 1) opts.breakLine = true;
+        out.push({ text: r.text || "", options: opts });
+      }
+    }
+    return out;
+  }
+
+  async function addElementToSlide(pgPptx, pgSlide, el, mediaById, warnings) {
+    if (el.x == null) return; // 位置不明の要素は再構築対象外（既知の限界）
+    const baseOpts = { x: el.x, y: el.y, w: Math.max(el.w, 0.05), h: Math.max(el.h, 0.05) };
+    if (el.rotDeg) baseOpts.rotate = Math.round(el.rotDeg);
+
+    if (el.type === "text" || el.type === "shape") {
+      const hasText = (elementPlainText(el) || "").trim() !== "";
+      if (el.type === "shape" && (el.shapeType !== "rect" || el.fill || el.line)) {
+        const shapeOpts = { ...baseOpts };
+        if (el.fill && el.fill.type === "solid" && pgColor(el.fill.color)) {
+          shapeOpts.fill = { color: pgColor(el.fill.color) };
+        } else if (el.fill && el.fill.type === "none") {
+          shapeOpts.fill = { type: "none" };
+        }
+        if (el.line && el.line.none) {
+          shapeOpts.line = { type: "none" };
+        } else if (el.line && pgColor(el.line.color)) {
+          shapeOpts.line = { color: pgColor(el.line.color), width: el.line.widthPt || 1 };
+        }
+        try {
+          pgSlide.addShape(toPptxGenShapeType(pgPptx, el.shapeType), shapeOpts);
+        } catch (e) {
+          warnings.push(`図形(${el.shapeType})の再現に失敗したため四角形で代替しました: ${e.message}`);
+          pgSlide.addShape(pgPptx.ShapeType.rect, shapeOpts);
+        }
+      }
+      if (hasText) {
+        const runs = buildRunsForAddText(el.paragraphs);
+        pgSlide.addText(runs, { ...baseOpts, fontSize: 14, valign: "top" });
+      }
+      return;
+    }
+
+    if (el.type === "image") {
+      const media = mediaById.get(el.mediaId);
+      if (!media) {
+        warnings.push("参照先の画像データが見つからず、1点スキップしました。");
+        return;
+      }
+      if (media.mime === "application/octet-stream" || media.ext === "emf" || media.ext === "wmf") {
+        warnings.push("EMF/WMF形式の画像は再現できないためスキップしました（元データはpptx内に温存されません。既知の制約）。");
+        return;
+      }
+      try {
+        const b64 = await blobToBase64(media.blob);
+        pgSlide.addImage({ data: `${media.mime};base64,${b64}`, ...baseOpts });
+      } catch (e) {
+        warnings.push("画像の埋め込みに失敗しました: " + e.message);
+      }
+      return;
+    }
+
+    if (el.type === "table") {
+      const rows = el.rows.map((row) => row.map((cellText) => ({ text: cellText })));
+      if (rows.length === 0) return;
+      pgSlide.addTable(rows, { ...baseOpts, fontSize: 11, border: { color: "999999", pt: 0.5 } });
+      return;
+    }
+  }
+
+  /** dirA から dirB/basename(toPath) への相対パスを計算する（"../"の数を実際のディレクトリ差から求める） */
+  function relativizeSimple(fromDir, toPath) {
+    const fromParts = fromDir.split("/").filter(Boolean);
+    const toDir = dirName(toPath);
+    const toParts = toDir.split("/").filter(Boolean);
+    let i = 0;
+    while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i]) i++;
+    const ups = fromParts.length - i;
+    const downs = toParts.slice(i).concat([toPath.slice(toPath.lastIndexOf("/") + 1)]);
+    return "../".repeat(ups) + downs.join("/");
+  }
+
+  function uniquifyPath(path, usedPaths) {
+    if (!usedPaths.has(path)) return path;
+    const dot = path.lastIndexOf(".");
+    const stem = dot === -1 ? path : path.slice(0, dot);
+    const ext = dot === -1 ? "" : path.slice(dot);
+    let n = 1;
+    while (usedPaths.has(`${stem}__src${n}${ext}`)) n++;
+    return `${stem}__src${n}${ext}`;
+  }
+
+  /* ---- ZIPパーツの再帰コピー（依存パーツ・相対参照の整合を保つ） ----
+   * 重要な設計上の注意: .rels ファイルは「オーナーパーツ（対応する本体パーツ）の
+   * 改名結果」から機械的にパスを導出する（relsPathFor(ownerNewPath)）。
+   * .relsファイル自体を独立してuniquifyすると、本体パーツの新しい名前と
+   * ズレて参照切れを起こすため（実際に発生した不具合: グラフスライドの
+   * rId2が解決できなくなる問題）、この順序を厳守する。 */
+  async function copyPartRecursive(sourceZip, partPath, outFiles, usedPaths, renameMap) {
+    if (renameMap.has(partPath)) return renameMap.get(partPath);
+    const file = sourceZip.file(partPath);
+    if (!file) return null;
+
+    if (partPath.endsWith(".rels")) {
+      const ownerOldPath = partPath.replace(/_rels\/([^/]+)\.rels$/, "$1");
+      const ownerNewPath = renameMap.has(ownerOldPath)
+        ? renameMap.get(ownerOldPath)
+        : await copyPartRecursive(sourceZip, ownerOldPath, outFiles, usedPaths, renameMap);
+      if (!ownerNewPath) return null;
+      const newPath = relsPathFor(ownerNewPath);
+      renameMap.set(partPath, newPath);
+      usedPaths.add(newPath);
+
+      const text = await file.async("text");
+      const relsDoc = parseXmlText(text);
+      const relEls = Array.from(relsDoc.getElementsByTagNameNS(NS.rel, "Relationship"));
+      const ownerOldDir = dirName(ownerOldPath);
+      const ownerNewDir = dirName(ownerNewPath);
+      let newXml =
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+      for (const relEl of relEls) {
+        const rid = relEl.getAttribute("Id");
+        const type = relEl.getAttribute("Type");
+        const target = relEl.getAttribute("Target");
+        const targetMode = relEl.getAttribute("TargetMode");
+        if (targetMode === "External" || /^https?:\/\//i.test(target)) {
+          newXml += `<Relationship Id="${rid}" Type="${type}" Target="${target}" TargetMode="External"/>`;
+          continue;
+        }
+        const depOldPath = resolvePath(ownerOldDir, target);
+        const depNewPath = await copyPartRecursive(sourceZip, depOldPath, outFiles, usedPaths, renameMap);
+        const finalDepPath = depNewPath || depOldPath;
+        const newTarget = relativizeSimple(ownerNewDir, finalDepPath);
+        newXml += `<Relationship Id="${rid}" Type="${type}" Target="${newTarget}"/>`;
+      }
+      newXml += "</Relationships>";
+      outFiles.set(newPath, { type: "string", data: newXml });
+      return newPath;
+    }
+
+    const newPath = uniquifyPath(partPath, usedPaths);
+    usedPaths.add(newPath);
+    renameMap.set(partPath, newPath);
+
+    const isText = /\.xml$/i.test(partPath);
+    if (isText) {
+      const text = await file.async("text");
+      outFiles.set(newPath, { type: "string", data: text });
+    } else {
+      const bin = await file.async("uint8array");
+      outFiles.set(newPath, { type: "binary", data: bin });
+    }
+
+    // このパーツ自身の.relsが存在するなら連鎖コピー（上のrels分岐へ再帰。newPath確定後に行う）
+    const selfRelsPath = relsPathFor(partPath);
+    if (sourceZip.file(selfRelsPath)) {
+      await copyPartRecursive(sourceZip, selfRelsPath, outFiles, usedPaths, renameMap);
+    }
+    return newPath;
+  }
+
+  function nextAvailableId(existingIds, startAt) {
+    let n = startAt;
+    while (existingIds.has(n)) n++;
+    existingIds.add(n);
+    return n;
+  }
+
+  async function mergeContentTypes(genZip, sourceZip, copiedPathMap) {
+    const genCtText = await genZip.file(CONTENT_TYPES_PATH).async("text");
+    const genDoc = parseXmlText(genCtText);
+    const defaults = new Map(); // ext -> contentType
+    const overrides = new Map(); // partName(先頭/あり) -> contentType
+    for (const d of genDoc.getElementsByTagNameNS(CT_NS, "Default")) {
+      defaults.set(d.getAttribute("Extension").toLowerCase(), d.getAttribute("ContentType"));
+    }
+    for (const o of genDoc.getElementsByTagNameNS(CT_NS, "Override")) {
+      overrides.set(o.getAttribute("PartName"), o.getAttribute("ContentType"));
+    }
+
+    if (sourceZip.file(CONTENT_TYPES_PATH)) {
+      const srcCtText = await sourceZip.file(CONTENT_TYPES_PATH).async("text");
+      const srcDoc = parseXmlText(srcCtText);
+      const srcDefaults = new Map();
+      const srcOverrides = new Map();
+      for (const d of srcDoc.getElementsByTagNameNS(CT_NS, "Default")) {
+        srcDefaults.set(d.getAttribute("Extension").toLowerCase(), d.getAttribute("ContentType"));
+      }
+      for (const o of srcDoc.getElementsByTagNameNS(CT_NS, "Override")) {
+        srcOverrides.set(o.getAttribute("PartName"), o.getAttribute("ContentType"));
+      }
+      // コピーされたパーツについてのみ、元のOverride/Defaultをマージする
+      for (const [oldPath, newPath] of copiedPathMap) {
+        const partName = "/" + newPath;
+        const oldPartName = "/" + oldPath;
+        if (srcOverrides.has(oldPartName) && !overrides.has(partName)) {
+          overrides.set(partName, srcOverrides.get(oldPartName));
+        } else if (!overrides.has(partName)) {
+          const ext = (newPath.split(".").pop() || "").toLowerCase();
+          if (!defaults.has(ext) && srcDefaults.has(ext)) {
+            defaults.set(ext, srcDefaults.get(ext));
+          }
+        }
+      }
+    }
+
+    let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    xml += `<Types xmlns="${CT_NS}">`;
+    for (const [ext, ct] of defaults) xml += `<Default Extension="${ext}" ContentType="${ct}"/>`;
+    for (const [pn, ct] of overrides) xml += `<Override PartName="${pn}" ContentType="${ct}"/>`;
+    xml += "</Types>";
+    return xml;
+  }
+
+  /**
+   * 温存スライドを、PptxGenJS出力zipへ「そのままの見た目」で差し込む。
+   * 最難関の処理（実装引き継ぎ書§5）。相対パス参照が壊れないよう、
+   * すべてのスライドパーツは ppt/slides/ 直下に留め、メディア/チャート等の
+   * 衝突だけを個別に回避する。
+   */
+  async function injectPreservedSlides(genBlob, sourceBlob, orderedSlideMeta) {
+    const genZip = await JSZip.loadAsync(await genBlob.arrayBuffer());
+    const sourceZip = await JSZip.loadAsync(await sourceBlob.arrayBuffer());
+
+    const outFiles = new Map(); // path -> {type:'string'|'binary', data}
+    const usedPaths = new Set();
+
+    for (const relPath of Object.keys(genZip.files)) {
+      if (genZip.files[relPath].dir) continue;
+      usedPaths.add(relPath);
+    }
+
+    // 温存スライドを ppt/slides/ 配下にコピー（衝突しない専用の名前を使う）
+    const renameMap = new Map();
+    const preservedNewPaths = []; // { logicalIndex, path }
+    for (const meta of orderedSlideMeta.filter((m) => m.preserve)) {
+      const desiredPath = `ppt/slides/orig_${meta.logicalIndex}.xml`;
+      let newPath = desiredPath;
+      if (usedPaths.has(newPath)) newPath = `ppt/slides/orig_${meta.logicalIndex}_${Date.now()}.xml`;
+      usedPaths.add(newPath);
+      renameMap.set(meta.sourcePath, newPath);
+
+      const xmlText = await sourceZip.file(meta.sourcePath).async("text");
+      outFiles.set(newPath, { type: "string", data: xmlText });
+
+      const relsPath = relsPathFor(meta.sourcePath);
+      if (sourceZip.file(relsPath)) {
+        await copyPartRecursive(sourceZip, relsPath, outFiles, usedPaths, renameMap);
+      }
+      preservedNewPaths.push({ logicalIndex: meta.logicalIndex, path: newPath });
+    }
+
+    // Content_Types のマージ（コピーされた全パーツ分。スライド自身も含める）
+    const allCopied = new Map(renameMap);
+    const mergedCt = await mergeContentTypes(genZip, sourceZip, allCopied);
+
+    // 生成側(gen)の非温存スライドの出力順パス一覧を取得
+    const genPresDoc = parseXmlText(await genZip.file("ppt/presentation.xml").async("text"));
+    const genPresRels = parseRelsXml(await genZip.file("ppt/_rels/presentation.xml.rels").async("text"));
+    const genSldIdLst = firstChildNS(genPresDoc.documentElement, NS.p, "sldIdLst");
+    const genSldIdEls = genSldIdLst ? childrenNS(genSldIdLst, NS.p, "sldId") : [];
+    const genOrderedPaths = genSldIdEls.map((el) => {
+      const rid = el.getAttributeNS(NS.r, "id");
+      return resolvePath("ppt", genPresRels.get(rid));
+    });
+
+    // 最終順序を構築: orderedSlideMeta(元の論理順)に沿って、
+    // 温存スライドは新パス、非温存スライドはgen側パスを出現順に割り当てる
+    let genCursor = 0;
+    const finalOrderedPaths = [];
+    for (const meta of orderedSlideMeta) {
+      if (meta.preserve) {
+        const found = preservedNewPaths.find((p) => p.logicalIndex === meta.logicalIndex);
+        finalOrderedPaths.push(found.path);
+      } else {
+        finalOrderedPaths.push(genOrderedPaths[genCursor]);
+        genCursor++;
+      }
+    }
+
+    // 非温存(gen由来)スライドとその.relsを出力ファイル一覧へ登録
+    for (const p of genOrderedPaths) {
+      outFiles.set(p, { type: "string", data: await genZip.file(p).async("text") });
+      const rp = relsPathFor(p);
+      if (genZip.file(rp)) {
+        outFiles.set(rp, { type: "string", data: await genZip.file(rp).async("text") });
+      }
+    }
+
+    // gen側のスライド以外の全パーツ(テーマ/マスター/レイアウト等)をベースとしてコピー
+    for (const relPath of Object.keys(genZip.files)) {
+      const entry = genZip.files[relPath];
+      if (entry.dir) continue;
+      if (relPath.startsWith("ppt/slides/")) continue;
+      if (relPath === "ppt/presentation.xml") continue;
+      if (relPath === "ppt/_rels/presentation.xml.rels") continue;
+      if (relPath === CONTENT_TYPES_PATH) continue;
+      if (outFiles.has(relPath)) continue;
+      const isText = /\.(xml|rels)$/i.test(relPath);
+      outFiles.set(relPath, {
+        type: isText ? "string" : "binary",
+        data: isText ? await entry.async("text") : await entry.async("uint8array"),
+      });
+    }
+
+    outFiles.set(CONTENT_TYPES_PATH, { type: "string", data: mergedCt });
+
+    // presentation.xml / presentation.xml.rels を最終順序で再構築
+    // 重要: Type属性は推測せず、元のgenPresRels XMLから正確な値をそのまま引き継ぐ
+    const genPresRelsDoc = parseXmlText(await genZip.file("ppt/_rels/presentation.xml.rels").async("text"));
+    const genPresRelEls = Array.from(genPresRelsDoc.getElementsByTagNameNS(NS.rel, "Relationship"));
+    const nonSlideRels = [];
+    const existingRIds = new Set();
+    for (const relEl of genPresRelEls) {
+      const rid = relEl.getAttribute("Id");
+      const type = relEl.getAttribute("Type");
+      const target = relEl.getAttribute("Target");
+      const num = parseInt(rid.replace(/\D/g, ""), 10) || 0;
+      existingRIds.add(num);
+      if (!genOrderedPaths.includes(resolvePath("ppt", target))) {
+        nonSlideRels.push({ rid, type, target });
+      }
+    }
+    let relsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    relsXml += `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`;
+    for (const r of nonSlideRels) {
+      relsXml += `<Relationship Id="${r.rid}" Type="${r.type}" Target="${r.target}"/>`;
+    }
+    const slideRIdForPath = new Map();
+    let sldIdXml = "";
+    let sldIdCounter = 256;
+    const existingSldIds = new Set();
+    for (const p of finalOrderedPaths) {
+      const rid = "rIdOut" + nextAvailableId(existingRIds, 1000);
+      slideRIdForPath.set(p, rid);
+      relsXml += `<Relationship Id="${rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="${p.replace(
+        /^ppt\//,
+        ""
+      )}"/>`;
+      const sid = nextAvailableId(existingSldIds, sldIdCounter);
+      sldIdCounter = sid + 1;
+      sldIdXml += `<p:sldId id="${sid}" r:id="${rid}"/>`;
+    }
+    relsXml += "</Relationships>";
+    outFiles.set("ppt/_rels/presentation.xml.rels", { type: "string", data: relsXml });
+
+    let presXml = await genZip.file("ppt/presentation.xml").async("text");
+    presXml = presXml.replace(/<p:sldIdLst>.*?<\/p:sldIdLst>/s, `<p:sldIdLst>${sldIdXml}</p:sldIdLst>`);
+    outFiles.set("ppt/presentation.xml", { type: "string", data: presXml });
+
+    // 最終ZIPを組み立てる
+    const outZip = new JSZip();
+    for (const [path, entry] of outFiles) {
+      if (entry.type === "string") outZip.file(path, entry.data);
+      else outZip.file(path, entry.data);
+    }
+    return outZip.generateAsync({ type: "blob" });
+  }
+
+  async function buildOutputPptx(project, slides, mediaRecords, onProgress) {
+    const mediaById = new Map(mediaRecords.map((m) => [m.mediaId, m]));
+    const preserveSlides = slides.filter((s) => s.preserve);
+    if (preserveSlides.length > 0 && !project.sourceBlob) {
+      throw new Error(
+        "温存対象スライドがありますが、元ファイルの控えがないため再現できません（Phase 2以前に解析されたプロジェクトの可能性があります）。お手数ですが pptx を再度読み込み直してください。"
+      );
+    }
+
+    const pgPptx = new PptxGenJS();
+    pgPptx.defineLayout({ name: "SBK_CUSTOM", width: project.slideSize.wIn, height: project.slideSize.hIn });
+    pgPptx.layout = "SBK_CUSTOM";
+
+    const warnings = [];
+    const nonPreserved = slides.filter((s) => !s.preserve);
+    for (let i = 0; i < nonPreserved.length; i++) {
+      const s = nonPreserved[i];
+      const pgSlide = pgPptx.addSlide();
+      for (const el of s.elements) {
+        await addElementToSlide(pgPptx, pgSlide, el, mediaById, warnings);
+      }
+      if (onProgress) onProgress(i + 1, nonPreserved.length);
+    }
+
+    const genBlob = await pgPptx.write({ outputType: "blob" });
+
+    let finalBlob = genBlob;
+    if (preserveSlides.length > 0) {
+      const orderedSlideMeta = slides.map((s) => ({
+        logicalIndex: s.index,
+        preserve: s.preserve,
+        sourcePath: s.sourcePath,
+      }));
+      finalBlob = await injectPreservedSlides(genBlob, project.sourceBlob, orderedSlideMeta);
+    }
+
+    return { blob: finalBlob, warnings };
+  }
+
+  /** 書き出し結果を、Phase1と同じ解析ロジックで読み直して検証する（実測ベースの検証） */
+  async function verifyRoundTrip(outputBlob, project, mediaRecords) {
+    const asFile = new File([outputBlob], "verify.pptx", {
+      type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    });
+    const reparsed = await parsePptx(asFile, null);
+    const outputHashes = new Set(Array.from(reparsed.mediaStore.values()).map((m) => m.byteHash));
+    const missingImages = mediaRecords.filter((m) => !outputHashes.has(m.byteHash));
+    return {
+      slideCountMatch: reparsed.slideCount === project.slideCount,
+      textHashMatch: reparsed.deckHash === project.deckHash,
+      allImagesPresent: missingImages.length === 0,
+      missingImageCount: missingImages.length,
+      reparsedSlideCount: reparsed.slideCount,
+      reparsedPreserveCount: reparsed.slides.filter((s) => s.preserve).length,
     };
   }
 
@@ -1004,6 +1540,10 @@
       updatedAt: now,
       phase: 1,
       sourceFileName: file.name,
+      // 温存スライドをZIP注入で再現するため、元ファイルそのものも保持する（Phase 2で使用）
+      sourceBlob: new Blob([parseResult.sourceArrayBuffer], {
+        type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      }),
       slideSize: {
         cxEmu: parseResult.slideSizeEmu.cx,
         cyEmu: parseResult.slideSizeEmu.cy,
@@ -1185,8 +1725,18 @@
       box.style.top = el.y * scale + "px";
       box.style.width = Math.max(2, el.w * scale) + "px";
       box.style.height = Math.max(2, el.h * scale) + "px";
+      if (el.rotDeg) box.style.transform = `rotate(${el.rotDeg}deg)`;
       if (el.type === "text") {
         box.textContent = elementPlainText(el).slice(0, 80);
+      } else if (el.type === "shape") {
+        if (el.fill && el.fill.type === "solid" && el.fill.color && el.fill.color.startsWith("#")) {
+          box.style.background = el.fill.color;
+        }
+        if (el.line && el.line.color && el.line.color.startsWith("#")) {
+          box.style.border = "1px solid " + el.line.color;
+        }
+        const t = elementPlainText(el).slice(0, 80);
+        if (t.trim()) box.textContent = t;
       } else if (el.type === "image") {
         const url = mediaUrlMap.get(el.mediaId);
         if (url) {
@@ -1290,8 +1840,73 @@
         setAnalysisStatus("コピーに失敗しました。手動でJSON書き出しをご利用ください。");
       }
     };
+    $("btn-build-output").onclick = () => handleBuildOutput(project, slides, mediaRecords);
 
     showScreen("analysis");
+  }
+
+  function setBuildStatus(text, kind) {
+    const el = $("build-status");
+    el.textContent = text || "";
+    el.classList.remove("is-error", "is-success");
+    if (kind) el.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  async function handleBuildOutput(project, slides, mediaRecords) {
+    const resultBox = $("build-result");
+    resultBox.hidden = true;
+    setBuildStatus("pptxを書き出し中...", null);
+    try {
+      const { blob, warnings } = await buildOutputPptx(project, slides, mediaRecords, (done, total) => {
+        setBuildStatus(`スライドを再構築中... ${done}/${total}`, null);
+      });
+
+      setBuildStatus("書き出し結果を検証中...", null);
+      const verify = await verifyRoundTrip(blob, project, mediaRecords);
+
+      resultBox.hidden = false;
+      const allOk = verify.slideCountMatch && verify.textHashMatch && verify.allImagesPresent;
+      resultBox.innerHTML = `
+        <h3>検証結果（書き出したpptxを再解析して自動チェック）</h3>
+        <ul class="verify-list">
+          <li><span class="verify-badge ${verify.slideCountMatch ? "ok" : "ng"}">${verify.slideCountMatch ? "OK" : "NG"}</span>
+            スライド数: ${verify.reparsedSlideCount} / ${project.slideCount}</li>
+          <li><span class="verify-badge ${verify.textHashMatch ? "ok" : "ng"}">${verify.textHashMatch ? "OK" : "NG"}</span>
+            全文テキストハッシュ一致（無改変の証明）</li>
+          <li><span class="verify-badge ${verify.allImagesPresent ? "ok" : "ng"}">${verify.allImagesPresent ? "OK" : "NG"}</span>
+            画像バイト一致（不足 ${verify.missingImageCount} 点）</li>
+          <li><span class="verify-badge ok">-</span>
+            温存スライド再検出数: ${verify.reparsedPreserveCount} / ${project.preserveCount}</li>
+        </ul>
+        ${
+          warnings.length
+            ? `<p>書き出し時の注意事項（${warnings.length}件）:</p><ul class="build-warnings">${warnings
+                .slice(0, 20)
+                .map((w) => `<li>${escapeHtml(w)}</li>`)
+                .join("")}</ul>`
+            : ""
+        }
+      `;
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = (project.name || "output") + "_ブラッシュアップ.pptx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+      setBuildStatus(
+        allOk
+          ? "書き出しが完了し、検証もすべて通過しました。ダウンロードフォルダをご確認ください。"
+          : "書き出しは完了しましたが、検証で一部不一致がありました。上の結果をご確認ください。",
+        allOk ? "success" : "error"
+      );
+    } catch (e) {
+      console.error(e);
+      setBuildStatus("書き出しに失敗しました: " + e.message, "error");
+    }
   }
 
   function setAnalysisStatus(text) {
@@ -1354,6 +1969,13 @@
         "error"
       );
       return;
+    }
+    if (typeof PptxGenJS === "undefined") {
+      setStatus(
+        "libs/pptxgen.min.js が読み込めていません（Phase 2の書き出し機能に必要です）。" +
+          "実装引き継ぎ書 §3 の手順で libs フォルダに配置してください。インポート・解析自体は利用できます。",
+        "error"
+      );
     }
     setupDropzone();
     $("btn-back-home").addEventListener("click", () => {

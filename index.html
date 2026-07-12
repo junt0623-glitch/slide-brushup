@@ -2468,12 +2468,40 @@
   const PAGE_SPEC_SYSTEM_PROMPT = `あなたは展示会図録・学術発表スライドのレイアウトデザイナーです。
 <pages>内の各ページについて、指定されたデザインシステムに従ってレイアウトを再設計してください。
 
-絶対的な制約（最重要・違反不可）:
-- 全てのテキスト内容（本文・見出し・表のセル文字列）は一字一句変更しないこと。
-  要約・言い換え・省略・追加は禁止。誤字脱字に見えても「修正」しないこと
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【最重要】テキストは「配置し直す」だけで、「書き直す」のではありません
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+あなたの仕事は、既にあるテキストを新しいデザインの器に「移し替える」ことだけです。
+文章を書く・整える・直す仕事は一切含まれません。次を厳守してください。
+
+1. 各runの "text" には、入力で与えられた文字列を1文字も違えずコピーしてください。
+   入力の "text" をコピー&ペーストする感覚で、絶対に打ち直さないこと。
+2. 以下はすべて禁止です（1文字でも該当したら失敗とみなされます）:
+   - 言い換え・要約・省略・補足・語尾の変更・敬体/常体の変換
+   - 誤字・脱字・表記ゆれの「修正」（例:「茗讌」を「茗宴」に直す等。原文のまま残す）
+   - 全角/半角・約物（括弧・中黒・ダッシュ等）の統一や変換
+   - スペース・改行の追加/削除による「整形」（読みやすくしようとしないこと）
+   - 複数ページ間で用語や表現を「揃える」こと（各ページは独立。原文優先）
+3. テキストの分割・結合も避けてください。1つのrunにあった文字列を2つに割ったり、
+   逆に複数のrunを1つにまとめたりすると、比較時に不一致と判定されることがあります。
+   入力のparagraphs/runsの区切りは、できる限りそのまま保ってください。
+4. 各runには "tid"（識別子）が付いています。**tidは絶対に変更・削除しないでください。**
+   出力する各runに、入力と同じtidをそのまま付けて返してください（このtidを頼りに
+   システムが原文と照合します。tidが欠けたり変わると照合できず、不一致扱いになります）。
+5. 変えてよいのは「見た目」だけです: 位置(x,y,w,h)、フォントサイズ(sizePt)、色(color)、
+   太字/斜体(bold/italic)、要素の並び順、装飾図形の追加。**文字そのものは不変**。
+
+自己チェック: 出力する前に、各 "text" が入力の対応する文字列と完全一致しているか、
+1ページずつ照合してください。少しでも「読みやすくしたい」と感じたら、それは改変の
+サインです。原文のまま残してください。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+その他の絶対的な制約
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 画像要素はmediaIdを変更しないこと（新しい画像は生成できません）。位置・サイズの変更は自由
-- 表のセル文字列(rows)は変更しないこと。行数・列数の変更も不可（配置の変更のみ許可）
+- 表のセル文字列(rows)は上記テキスト同様に一字一句不変。行数・列数の変更も不可（配置のみ）
 - 与えられた要素を漏れなく含めること（削除しない）
+- <pages>で与えられた全ページを出力に含めること（一部だけ返さない）
 
 デザインシステムに従うこと:
 - 色はdesignSystem.paletteの色のみ使用（primary/secondary/accent/background）
@@ -2491,15 +2519,28 @@
      "isTextBox": true/false,
      "fill": {"type":"solid","color":"#RRGGBB"} または {"type":"none"} または null,
      "line": {"color":"#RRGGBB","widthPt":数値} または null,
-     "paragraphs": [{"align":"left","runs":[{"text":"元のテキストそのまま","bold":false,"italic":false,"sizePt":数値,"color":"#RRGGBB"}]}]},
+     "paragraphs": [{"align":"left","runs":[{"tid":"入力と同じtidをそのまま","text":"入力の文字列を1文字も違えずコピー","bold":false,"italic":false,"sizePt":数値,"color":"#RRGGBB"}]}]},
     {"type": "image", "x":数値, "y":数値, "w":数値, "h":数値, "mediaId": "元のmediaIdをそのまま"},
     {"type": "table", "x":数値, "y":数値, "w":数値, "h":数値, "rows": [["元のセル文字列そのまま", "..."], ["..."]]}
   ]}
 ]}`;
 
-  function simplifyElementForPrompt(e) {
+  function simplifyElementForPrompt(e, elIndex) {
     if (e.type === "image") return { type: "image", x: e.x, y: e.y, w: e.w, h: e.h, mediaId: e.mediaId };
     if (e.type === "table") return { type: "table", x: e.x, y: e.y, w: e.w, h: e.h, rows: e.rows };
+    // 各runに安定した識別子(tid)を付与する。AIにはtidをそのまま保持させ、
+    // 読み込み時に元テキストをtidで引き当てて上書きする（＝AIがtextを書き換えても
+    // 最終的な文字列は必ず原文に戻る）。paragraphs構造の目印にもなる。
+    const paragraphs = (e.paragraphs || []).map((p, pi) => ({
+      align: p.align || "left",
+      runs: (p.runs || []).map((r, ri) => ({
+        tid: `${elIndex}-${pi}-${ri}`,
+        text: r.break ? "" : r.text || "",
+        break: !!r.break,
+        bold: !!r.bold,
+        italic: !!r.italic,
+      })),
+    }));
     return {
       type: "shape",
       x: e.x,
@@ -2510,7 +2551,7 @@
       isTextBox: e.isTextBox !== false,
       fill: e.fill || null,
       line: e.line || null,
-      paragraphs: e.paragraphs || [],
+      paragraphs,
     };
   }
 
@@ -2528,10 +2569,44 @@
         index: s.index,
         title: (s.aiSummary && s.aiSummary.title) || null,
         role: (s.aiSummary && s.aiSummary.role) || null,
-        elements: (s.elements || []).filter((e) => e.x != null).map(simplifyElementForPrompt),
+        elements: (s.elements || [])
+          .filter((e) => e.x != null)
+          .map((e, i) => simplifyElementForPrompt(e, i)),
       })),
     };
     return "<pages>\n" + JSON.stringify(input) + "\n</pages>";
+  }
+
+  /** 元スライドの全runについて tid → 原文テキスト のマップを作る。
+   *  AI応答のtextをこのマップの値で上書きすることで、文字列の改変を機械的に打ち消す。 */
+  function buildTidTextMap(slide) {
+    const map = new Map();
+    const positioned = (slide.elements || []).filter((e) => e.x != null);
+    positioned.forEach((e, elIndex) => {
+      if (e.type !== "shape" && e.type !== "text") return;
+      (e.paragraphs || []).forEach((p, pi) => {
+        (p.runs || []).forEach((r, ri) => {
+          map.set(`${elIndex}-${pi}-${ri}`, r.break ? "" : r.text || "");
+        });
+      });
+    });
+    return map;
+  }
+
+  /** AI応答のgenElements内の各runについて、tidが元マップにあれば原文で上書きする。
+   *  これにより「AIがうっかり言い換えても、最終的な文字列は必ず原文に一致する」。 */
+  function restoreTextByTid(genElements, tidMap) {
+    for (const el of genElements) {
+      if (!el || (el.type !== "shape" && el.type !== "text")) continue;
+      for (const p of el.paragraphs || []) {
+        for (const r of p.runs || []) {
+          if (r && typeof r.tid === "string" && tidMap.has(r.tid)) {
+            r.text = tidMap.get(r.tid);
+          }
+        }
+      }
+    }
+    return genElements;
   }
 
   function buildPageSpecCombinedText(pagesBatch, designSystem, slideSize) {
@@ -2552,12 +2627,21 @@
     for (const p of pages) {
       const slide = slidesByIndex.get(p.index);
       if (!slide) continue;
-      const genElements = Array.isArray(p.elements) ? p.elements : [];
+      let genElements = Array.isArray(p.elements) ? p.elements : [];
+
+      // tidを使って原文テキストを機械的に復元する（AIが言い換えても打ち消される）。
+      // これで大半のケースは一致するはずだが、AIがtidを落とした/新規runを足した等で
+      // 復元しきれない場合に備え、最終的な文字列比較も引き続き行う。
+      const tidMap = buildTidTextMap(slide);
+      genElements = restoreTextByTid(genElements, tidMap);
+
       const match = flattenCharsForCompare(genElements) === flattenCharsForCompare(slide.elements);
       slide.genElements = genElements;
       slide.genStatus = "done";
       slide.genTextMatch = match;
-      slide.genError = match ? null : "テキスト内容の一致確認に失敗しました（文字列が元のスライドと異なります）。";
+      slide.genError = match
+        ? null
+        : "テキスト内容の一致確認に失敗しました（原文復元後もなお文字列が異なります。AIが段落構成を大きく変えた可能性があります）。";
       slide.genApproved = match; // 一致していれば初期承認、不一致は要確認のため未承認のまま
       await idbPut("slides", slide);
       results.push({ index: p.index, match });

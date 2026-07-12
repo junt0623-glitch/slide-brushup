@@ -1854,8 +1854,14 @@
           `スライド${s.index + 1}: 温存を解除して再構築したため、アニメーションは失われました（画面切り替えは維持されます）。`
         );
       }
+      // Phase 4で承認済みの生成結果があればそちらを使う。なければPhase 1の元レイアウトのまま出力する
+      const useGenerated = s.genStatus === "done" && s.genApproved && Array.isArray(s.genElements);
+      const elementsToUse = useGenerated ? s.genElements : s.elements;
+      if (s.genStatus === "done" && !s.genApproved) {
+        warnings.push(`スライド${s.index + 1}: Phase 4の生成結果が未承認のため、元のレイアウトのまま出力しました。`);
+      }
       const pgSlide = pgPptx.addSlide();
-      for (const el of s.elements) {
+      for (const el of elementsToUse) {
         await addElementToSlide(pgPptx, pgSlide, el, mediaById, warnings);
       }
       if (onProgress) onProgress(i + 1, nonPreserved.length);
@@ -1880,16 +1886,29 @@
   }
 
   /** 書き出し結果を、Phase1と同じ解析ロジックで読み直して検証する（実測ベースの検証） */
-  async function verifyRoundTrip(outputBlob, project, mediaRecords) {
+  /** 現在の承認状態を反映した「期待されるデッキ全体のテキスト」のハッシュを計算する。
+   *  Phase 4で承認済みの生成結果があるスライドはその内容を、それ以外は元の内容を使う。
+   *  これにより、意図的に言い換えた（がユーザーが承認した）内容も正しく検証できる。 */
+  async function computeExpectedDeckHash(slides) {
+    const texts = slides.map((s) => {
+      const useGenerated = s.genStatus === "done" && s.genApproved && Array.isArray(s.genElements);
+      const elements = useGenerated ? s.genElements : s.elements;
+      return elementsPlainTextConcat(elements);
+    });
+    return sha256Hex(texts.join("\u0000"));
+  }
+
+  async function verifyRoundTrip(outputBlob, project, mediaRecords, slides) {
     const asFile = new File([outputBlob], "verify.pptx", {
       type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     });
     const reparsed = await parsePptx(asFile, null);
     const outputHashes = new Set(Array.from(reparsed.mediaStore.values()).map((m) => m.byteHash));
     const missingImages = mediaRecords.filter((m) => !outputHashes.has(m.byteHash));
+    const expectedDeckHash = await computeExpectedDeckHash(slides);
     return {
       slideCountMatch: reparsed.slideCount === project.slideCount,
-      textHashMatch: reparsed.deckHash === project.deckHash,
+      textHashMatch: reparsed.deckHash === expectedDeckHash,
       allImagesPresent: missingImages.length === 0,
       missingImageCount: missingImages.length,
       reparsedSlideCount: reparsed.slideCount,
@@ -3517,7 +3536,7 @@
       });
 
       setBuildStatus("書き出し結果を検証中...", null);
-      const verify = await verifyRoundTrip(blob, project, mediaRecords);
+      const verify = await verifyRoundTrip(blob, project, mediaRecords, slides);
 
       resultBox.hidden = false;
       const allOk = verify.slideCountMatch && verify.textHashMatch && verify.allImagesPresent;

@@ -258,6 +258,17 @@
     border: 1px solid var(--color-border); border-radius: 4px; box-sizing: border-box; resize: vertical;
   }
 
+  .progress-track {
+    background: #eee9df; border-radius: 999px; height: 8px; overflow: hidden; margin: 8px 0 14px;
+  }
+  .progress-fill { height: 100%; background: var(--color-celadon); width: 0%; transition: width .3s; }
+
+  .gen-badge { display: inline-block; font-size: 0.7rem; padding: 2px 6px; border-radius: 3px; margin-left: 6px; }
+  .gen-badge--ok { background: #eaf3ec; color: var(--color-celadon-dark); }
+  .gen-badge--mismatch { background: #fbf1de; color: var(--color-amber); }
+  .gen-badge--failed { background: #f6e6e2; color: var(--color-danger); }
+  .gen-approve-label { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; margin-top: 6px; }
+
   .ai-plan-result { margin-top: 16px; }
   .ai-plan-result h3 { font-size: 0.88rem; margin: 16px 0 6px; }
   .ai-plan-result h3:first-child { margin-top: 0; }
@@ -529,6 +540,48 @@
         <h3>デザインシステム案（1つ選択してください）</h3>
         <div id="ai-design-systems" class="design-system-grid"></div>
       </div>
+    </section>
+
+    <section id="gen-section" class="ai-section" hidden>
+      <div class="ai-section__header">
+        <h2 class="section-heading">④ 一括ページ生成（Phase 4）</h2>
+      </div>
+      <p class="ai-section__note">
+        採用したデザインシステムに沿って、各ページを1:1で再構築します。
+        <strong>正直な制約:</strong> 今回のバージョンでは、③で提案された分割/統合/反復プランは
+        参考表示のみで、ページ数を変える処理はまだ実装していません（1ページ→1ページの
+        デザイン再適用のみです。詳細はREADME参照）。テキスト内容が一字一句変わっていないかは
+        申告ではなく実際の文字列比較で検証し、不一致があれば個別に警告します。
+      </p>
+      <p>採用中のデザイン: <strong id="gen-active-design-name">-</strong></p>
+      <p id="gen-progress-text" class="ai-section__note"></p>
+      <div class="progress-track"><div id="gen-progress-fill" class="progress-fill"></div></div>
+
+      <!-- 手動コピペモード（無料） -->
+      <div id="gen-manual-panel">
+        <label class="ai-settings__field" style="max-width:220px">
+          <span>1回あたりのページ数（バッチサイズ）</span>
+          <select id="gen-batch-size">
+            <option value="1">1ページ</option>
+            <option value="3" selected>3ページ</option>
+            <option value="5">5ページ</option>
+            <option value="10">10ページ</option>
+          </select>
+        </label>
+        <button id="btn-copy-gen-batch" class="btn btn--ghost">次のバッチのプロンプトをコピーする</button>
+        <textarea id="paste-gen-response" class="ai-paste-area" placeholder="claude.aiの回答（JSON）をここに貼り付け"></textarea>
+        <button id="btn-load-gen-response" class="btn">貼り付けた回答を読み込む</button>
+      </div>
+
+      <!-- APIキー自動実行モード（有料） -->
+      <div id="gen-api-panel" hidden>
+        <button id="btn-gen-start" class="btn">生成を開始する</button>
+        <button id="btn-gen-pause" class="btn btn--ghost" hidden>一時停止する</button>
+      </div>
+
+      <p id="gen-status" class="status" aria-live="polite"></p>
+
+      <div id="gen-review-grid" class="slide-grid"></div>
     </section>
 
     <section class="slide-grid" id="slide-grid"></section>
@@ -2113,13 +2166,49 @@
     let t = text.trim();
     const fenceMatch = t.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch) t = fenceMatch[1].trim();
-    try {
-      return JSON.parse(t);
-    } catch (e) {
-      throw new Error(
-        "AIの応答をJSONとして解釈できませんでした。応答の先頭200文字: " + t.slice(0, 200)
-      );
+
+    const tryParse = (s) => {
+      try {
+        return { ok: true, value: JSON.parse(s) };
+      } catch (e) {
+        return { ok: false, error: e };
+      }
+    };
+
+    let result = tryParse(t);
+    if (result.ok) return result.value;
+
+    // claude.aiのチャットUI経由だと起きやすい「よくある崩れ」を自動修復してから再挑戦する
+    const repaired = t
+      .replace(/[\u201C\u201D]/g, '"') // スマートクォート(二重引用符)→直引用符
+      .replace(/[\u2018\u2019]/g, "'") // スマートクォート(単一引用符)
+      .replace(/,\s*([}\]])/g, "$1"); // 配列/オブジェクト末尾の余計なカンマを除去
+
+    result = tryParse(repaired);
+    if (result.ok) return result.value;
+
+    // それでも失敗: JSON.parseのエラー位置周辺を具体的に示し、原因を特定しやすくする
+    const posMatch = /position (\d+)/.exec(result.error.message);
+    let detail;
+    if (posMatch) {
+      const pos = parseInt(posMatch[1], 10);
+      const start = Math.max(0, pos - 100);
+      detail =
+        "解釈に失敗した位置の前後: 「" +
+        t.slice(start, pos) +
+        "《ここで解釈失敗》" +
+        t.slice(pos, pos + 100) +
+        "」";
+    } else {
+      detail = "応答の先頭200文字: " + t.slice(0, 200);
     }
+    throw new Error(
+      "AIの応答をJSONとして解釈できませんでした（" +
+        result.error.message +
+        "）。" +
+        detail +
+        " ／ コピーが応答の途中で切れていないか、コードブロック以外の説明文が混ざっていないかをご確認のうえ、コピーし直してみてください。"
+    );
   }
 
   /** デザイン提案のプレビュー対象として、内容の異なる代表ページを最大5枚選ぶ
@@ -2311,8 +2400,185 @@
   }
 
   /* ============================================================
-   * 8. UI: 汎用ヘルパー
+   * 7.6. 一括ページ生成キュー（Phase 4）
+   *   ・採用したデザインシステムに沿って、非温存スライドをページ単位で再構築する
+   *   ・「テキストは一字一句変更しない」制約を、AIの申告ではなく実際の文字列比較で検証する
+   *   ・キューの進行状況はslideレコードに直接persistするため、ブラウザを閉じても
+   *     再度開けば残りの"pending"だけが処理される（＝それ自体がレジューム機能）
+   *   ・スコープの正直な限定: 分割/統合/反復プランは参考情報として表示するのみで、
+   *     ページ数を変える機械的処理はまだ実装していない（1ページ→1ページの
+   *     デザイン再適用のみ）。README参照。
    * ============================================================ */
+
+  /** 要素配列から「実際の文字」だけを取り出す（空白除去済み）。
+   *  段落/ランの再構成による差異は許容しつつ、内容の変更だけを検出するための比較用。 */
+  function flattenCharsForCompare(elements) {
+    const raw = (elements || [])
+      .filter((e) => e.type === "shape" || e.type === "text" || e.type === "table")
+      .map((e) => {
+        if (e.type === "table") return (e.rows || []).flat().join("");
+        return (e.paragraphs || [])
+          .map((p) => (p.runs || []).filter((r) => !r.break).map((r) => r.text || "").join(""))
+          .join("");
+      })
+      .join("");
+    return raw.replace(/\s+/g, "");
+  }
+
+  const PAGE_SPEC_SYSTEM_PROMPT = `あなたは展示会図録・学術発表スライドのレイアウトデザイナーです。
+<pages>内の各ページについて、指定されたデザインシステムに従ってレイアウトを再設計してください。
+
+絶対的な制約（最重要・違反不可）:
+- 全てのテキスト内容（本文・見出し・表のセル文字列）は一字一句変更しないこと。
+  要約・言い換え・省略・追加は禁止。誤字脱字に見えても「修正」しないこと
+- 画像要素はmediaIdを変更しないこと（新しい画像は生成できません）。位置・サイズの変更は自由
+- 表のセル文字列(rows)は変更しないこと。行数・列数の変更も不可（配置の変更のみ許可）
+- 与えられた要素を漏れなく含めること（削除しない）
+
+デザインシステムに従うこと:
+- 色はdesignSystem.paletteの色のみ使用（primary/secondary/accent/background）
+- タイトルはtypography.titleSizePt以上、本文はtypography.bodySizePt程度とし、サイズ差を明確に
+- 本文は左揃え
+- 装飾目的だけのアクセントバーやタイトル下線は使わない
+- 元のレイアウトに縛られず、デザインシステムに沿った洗練された配置に組み直してよい
+
+出力はJSONオブジェクトのみ。前置き・後書き・コードフェンス不要。座標(x,y,w,h)の単位はインチ。
+
+出力形式:
+{"pages": [
+  {"index": 数値, "elements": [
+    {"type": "shape", "x":数値, "y":数値, "w":数値, "h":数値, "shapeType": "rect等のOOXML図形名",
+     "isTextBox": true/false,
+     "fill": {"type":"solid","color":"#RRGGBB"} または {"type":"none"} または null,
+     "line": {"color":"#RRGGBB","widthPt":数値} または null,
+     "paragraphs": [{"align":"left","runs":[{"text":"元のテキストそのまま","bold":false,"italic":false,"sizePt":数値,"color":"#RRGGBB"}]}]},
+    {"type": "image", "x":数値, "y":数値, "w":数値, "h":数値, "mediaId": "元のmediaIdをそのまま"},
+    {"type": "table", "x":数値, "y":数値, "w":数値, "h":数値, "rows": [["元のセル文字列そのまま", "..."], ["..."]]}
+  ]}
+]}`;
+
+  function simplifyElementForPrompt(e) {
+    if (e.type === "image") return { type: "image", x: e.x, y: e.y, w: e.w, h: e.h, mediaId: e.mediaId };
+    if (e.type === "table") return { type: "table", x: e.x, y: e.y, w: e.w, h: e.h, rows: e.rows };
+    return {
+      type: "shape",
+      x: e.x,
+      y: e.y,
+      w: e.w,
+      h: e.h,
+      shapeType: e.shapeType || "rect",
+      isTextBox: e.isTextBox !== false,
+      fill: e.fill || null,
+      line: e.line || null,
+      paragraphs: e.paragraphs || [],
+    };
+  }
+
+  function buildPageSpecUserContent(pagesBatch, designSystem, slideSize) {
+    const input = {
+      slideWidthIn: slideSize.wIn,
+      slideHeightIn: slideSize.hIn,
+      designSystem: {
+        name: designSystem.name,
+        palette: designSystem.palette,
+        typography: designSystem.typography,
+        notes: designSystem.notes || "",
+      },
+      pages: pagesBatch.map((s) => ({
+        index: s.index,
+        title: (s.aiSummary && s.aiSummary.title) || null,
+        role: (s.aiSummary && s.aiSummary.role) || null,
+        elements: (s.elements || []).filter((e) => e.x != null).map(simplifyElementForPrompt),
+      })),
+    };
+    return "<pages>\n" + JSON.stringify(input) + "\n</pages>";
+  }
+
+  function buildPageSpecCombinedText(pagesBatch, designSystem, slideSize) {
+    return (
+      PAGE_SPEC_SYSTEM_PROMPT +
+      "\n\n" +
+      buildPageSpecUserContent(pagesBatch, designSystem, slideSize) +
+      "\n\n(繰り返しますが、出力はJSONオブジェクトのみ。すべてのpagesを含めてください。)"
+    );
+  }
+
+  async function parseAndSaveGenResponse(resultText, slidesByIndex) {
+    const parsed = extractJson(resultText);
+    const pages = Array.isArray(parsed) ? parsed : parsed.pages;
+    if (!Array.isArray(pages)) throw new Error("生成結果の応答にpages配列が含まれていませんでした。");
+
+    const results = [];
+    for (const p of pages) {
+      const slide = slidesByIndex.get(p.index);
+      if (!slide) continue;
+      const genElements = Array.isArray(p.elements) ? p.elements : [];
+      const match = flattenCharsForCompare(genElements) === flattenCharsForCompare(slide.elements);
+      slide.genElements = genElements;
+      slide.genStatus = "done";
+      slide.genTextMatch = match;
+      slide.genError = match ? null : "テキスト内容の一致確認に失敗しました（文字列が元のスライドと異なります）。";
+      slide.genApproved = match; // 一致していれば初期承認、不一致は要確認のため未承認のまま
+      await idbPut("slides", slide);
+      results.push({ index: p.index, match });
+    }
+    return results;
+  }
+
+  /** キューを初期化する。温存スライドはskipped、それ以外は未処理ならpendingにする。
+   *  既にgenStatusを持つスライド（前回の続き）は上書きしない＝これがレジュームの仕組み。 */
+  async function initGenQueue(slides) {
+    for (const s of slides) {
+      if (effectivePreserve(s)) {
+        if (s.genStatus !== "skipped") {
+          s.genStatus = "skipped";
+          await idbPut("slides", s);
+        }
+      } else if (!s.genStatus) {
+        s.genStatus = "pending";
+        await idbPut("slides", s);
+      }
+    }
+  }
+
+  function computeGenProgress(slides) {
+    const eligible = slides.filter((s) => s.genStatus !== "skipped");
+    const done = eligible.filter((s) => s.genStatus === "done");
+    const failed = eligible.filter((s) => s.genStatus === "failed");
+    return { total: eligible.length, done: done.length, failed: failed.length, skipped: slides.length - eligible.length };
+  }
+
+  function getPendingSlides(slides) {
+    return slides.filter((s) => s.genStatus === "pending" || s.genStatus === "failed");
+  }
+
+  /** APIキー自動モード: pending/failedのスライドを1件ずつ順番に処理する。
+   *  pauseRef.currentがtrueになった時点で安全に停止する（レジューム可能）。 */
+  async function runGenQueueApi(project, slides, designSystem, pauseRef, onProgress) {
+    const models = await getModelSettings();
+    const slidesByIndex = new Map(slides.map((s) => [s.index, s]));
+
+    const queue = getPendingSlides(slides);
+    for (let i = 0; i < queue.length; i++) {
+      if (pauseRef.current) break;
+      const s = queue[i];
+      s.genStatus = "generating";
+      await idbPut("slides", s);
+      if (onProgress) onProgress(s.index, i + 1, queue.length);
+      try {
+        const userContent = buildPageSpecUserContent([s], designSystem, project.slideSize);
+        const resultText = await callClaudeApi(models.pageModel, PAGE_SPEC_SYSTEM_PROMPT, userContent, 4000, "page-spec");
+        await parseAndSaveGenResponse(resultText, slidesByIndex);
+      } catch (e) {
+        s.genStatus = "failed";
+        s.genError = e.message;
+        await idbPut("slides", s);
+      }
+    }
+
+    project.updatedAt = Date.now();
+    await idbPut("projects", project);
+  }
   const $ = (id) => document.getElementById(id);
 
   function setStatus(text, kind) {
@@ -2445,13 +2711,13 @@
    * ============================================================ */
   const THUMB_W = 260;
 
-  function renderThumb(container, slideSize, slide, mediaUrlMap) {
+  function renderElementsThumb(container, slideSize, elements, mediaUrlMap) {
     const scale = THUMB_W / slideSize.wIn;
     const thumbH = slideSize.hIn * scale;
     container.style.width = THUMB_W + "px";
     container.style.height = thumbH + "px";
     container.innerHTML = "";
-    for (const el of slide.elements) {
+    for (const el of elements) {
       if (el.x == null) continue; // 位置不明の要素は表示のみスキップ（データは保持済み）
       const box = document.createElement("div");
       box.className = "thumb-el thumb-el--" + el.type;
@@ -2489,6 +2755,10 @@
       }
       container.appendChild(box);
     }
+  }
+
+  function renderThumb(container, slideSize, slide, mediaUrlMap) {
+    renderElementsThumb(container, slideSize, slide.elements, mediaUrlMap);
     if (slide.preserve) {
       const badge = document.createElement("div");
       badge.className = "thumb-preserve-badge";
@@ -2636,7 +2906,7 @@
     };
     $("btn-build-output").onclick = () => handleBuildOutput(project, slides, mediaRecords);
 
-    setupAiSection(project, slides);
+    setupAiSection(project, slides, mediaUrlMap);
 
     showScreen("analysis");
   }
@@ -2683,7 +2953,7 @@
     }
   }
 
-  function renderAiPlan(project, slides) {
+  function renderAiPlan(project, slides, mediaUrlMap) {
     const plan = project.aiPlan;
     const resultBox = $("ai-plan-result");
     if (!plan) {
@@ -2777,8 +3047,9 @@
         project.selectedDesignSystemIndex = dsIndex;
         project.updatedAt = Date.now();
         await idbPut("projects", project);
-        renderAiPlan(project, slides);
+        renderAiPlan(project, slides, mediaUrlMap);
         setAiStatus(`「${ds.name}」を採用しました。この後のフェーズで全ページへ適用します。`, "success");
+        await setupGenSection(project, slides, mediaUrlMap);
       });
       card.appendChild(selectBtn);
 
@@ -2795,10 +3066,11 @@
     }
   }
 
-  async function setupAiSection(project, slides) {
-    renderAiPlan(project, slides);
+  async function setupAiSection(project, slides, mediaUrlMap) {
+    renderAiPlan(project, slides, mediaUrlMap);
     $("btn-ai-design").disabled = !slides.some((s) => s.aiSummary);
     $("btn-copy-design-prompt").disabled = !slides.some((s) => s.aiSummary);
+    await setupGenSection(project, slides, mediaUrlMap);
 
     // --- モード切替（手動コピペ=無料 / APIキー=有料自動） ---
     const manualPanel = $("ai-manual-panel");
@@ -2856,7 +3128,7 @@
       }
       try {
         await parseAndSaveDesignResponse(text, project);
-        renderAiPlan(project, slides);
+        renderAiPlan(project, slides, mediaUrlMap);
         setAiStatus("全体構成の分析結果を読み込みました。デザインシステム案から1つ選択してください。", "success");
       } catch (e) {
         console.error(e);
@@ -2894,7 +3166,7 @@
       try {
         setAiStatus("全体構成を分析中...", null);
         await runDesignStep(project, slides, (msg) => setAiStatus(msg, null));
-        renderAiPlan(project, slides);
+        renderAiPlan(project, slides, mediaUrlMap);
         setAiStatus("全体構成の分析が完了しました。デザインシステム案から1つ選択してください。", "success");
       } catch (e) {
         console.error(e);
@@ -2902,6 +3174,202 @@
       } finally {
         $("btn-ai-design").disabled = false;
       }
+    };
+  }
+
+  /* ============================================================
+   * 10.6 UI: 一括ページ生成キュー（Phase 4）
+   * ============================================================ */
+  function setGenStatus(text, kind) {
+    const el = $("gen-status");
+    el.textContent = text || "";
+    el.classList.remove("is-error", "is-success");
+    if (kind) el.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  function renderGenReviewGrid(project, slides, mediaUrlMap) {
+    const grid = $("gen-review-grid");
+    grid.innerHTML = "";
+    const withResult = slides.filter((s) => s.genStatus === "done" || s.genStatus === "failed");
+    for (const s of withResult) {
+      const card = document.createElement("div");
+      card.className = "slide-card";
+
+      const idxLine = document.createElement("p");
+      idxLine.className = "slide-card__index";
+      let badgeHtml = "";
+      if (s.genStatus === "failed") {
+        badgeHtml = `<span class="gen-badge gen-badge--failed">生成失敗</span>`;
+      } else if (s.genTextMatch) {
+        badgeHtml = `<span class="gen-badge gen-badge--ok">テキスト一致</span>`;
+      } else {
+        badgeHtml = `<span class="gen-badge gen-badge--mismatch">要確認: テキスト不一致</span>`;
+      }
+      idxLine.innerHTML = `<span>スライド ${s.index + 1}</span>${badgeHtml}`;
+      card.appendChild(idxLine);
+
+      const canvas = document.createElement("div");
+      canvas.className = "slide-canvas";
+      if (s.genStatus === "done") {
+        renderElementsThumb(canvas, project.slideSize, s.genElements, mediaUrlMap);
+      } else {
+        canvas.textContent = s.genError || "生成に失敗しました。";
+        canvas.style.fontSize = "10px";
+        canvas.style.padding = "8px";
+      }
+      card.appendChild(canvas);
+
+      if (s.genStatus === "done") {
+        const label = document.createElement("label");
+        label.className = "gen-approve-label";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = !!s.genApproved;
+        cb.addEventListener("change", async () => {
+          s.genApproved = cb.checked;
+          await idbPut("slides", s);
+        });
+        label.appendChild(cb);
+        label.append(" この内容で承認する");
+        card.appendChild(label);
+
+        const regenBtn = document.createElement("button");
+        regenBtn.className = "btn btn--small btn--ghost";
+        regenBtn.textContent = "別案を生成（Phase 5で実装予定）";
+        regenBtn.disabled = true;
+        regenBtn.style.marginTop = "6px";
+        card.appendChild(regenBtn);
+      } else {
+        const retryBtn = document.createElement("button");
+        retryBtn.className = "btn btn--small";
+        retryBtn.textContent = "このページだけ再試行対象にする";
+        retryBtn.addEventListener("click", async () => {
+          s.genStatus = "pending";
+          s.genError = null;
+          await idbPut("slides", s);
+          setGenStatus(`スライド${s.index + 1}を再試行キューに戻しました。`, "success");
+          updateGenProgressUI(slides);
+          renderGenReviewGrid(project, slides, mediaUrlMap);
+        });
+        card.appendChild(retryBtn);
+      }
+
+      grid.appendChild(card);
+    }
+  }
+
+  function updateGenProgressUI(slides) {
+    const { total, done, failed, skipped } = computeGenProgress(slides);
+    const pct = total > 0 ? Math.round(((done + failed) / total) * 100) : 0;
+    $("gen-progress-fill").style.width = pct + "%";
+    $("gen-progress-text").textContent =
+      `対象${total}枚中 完了${done}枚・失敗${failed}枚（温存スキップ${skipped}枚）`;
+  }
+
+  async function setupGenSection(project, slides, mediaUrlMap) {
+    const section = $("gen-section");
+    if (project.selectedDesignSystemIndex === null || project.selectedDesignSystemIndex === undefined) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const designSystem = project.aiPlan.designSystems[project.selectedDesignSystemIndex];
+    $("gen-active-design-name").textContent = designSystem.name;
+
+    await initGenQueue(slides);
+    updateGenProgressUI(slides);
+    renderGenReviewGrid(project, slides, mediaUrlMap);
+
+    const manualPanel = $("gen-manual-panel");
+    const apiPanel = $("gen-api-panel");
+    function applyGenMode() {
+      const apiSelected = $("ai-mode-api").checked;
+      manualPanel.hidden = apiSelected;
+      apiPanel.hidden = !apiSelected;
+    }
+    // 初回表示時はラジオボタンの現在のDOM状態に依存せず、APIキーの有無から直接判定する
+    // （setupGenSectionはsetupAiSectionのモード初期化コードより先に呼ばれるため、
+    //   ラジオの.checkedをそのまま読むとタイミング次第で誤判定することがあった）
+    manualPanel.hidden = !!getApiKey();
+    apiPanel.hidden = !getApiKey();
+    $("ai-mode-manual").addEventListener("change", applyGenMode);
+    $("ai-mode-api").addEventListener("change", applyGenMode);
+
+    // --- 手動コピペモード（無料・バッチ処理） ---
+    let currentManualBatch = [];
+    $("btn-copy-gen-batch").onclick = async () => {
+      const batchSize = parseInt($("gen-batch-size").value, 10);
+      const pending = getPendingSlides(slides);
+      if (pending.length === 0) {
+        setGenStatus("未処理のページはありません。すべて完了しています。", "success");
+        return;
+      }
+      currentManualBatch = pending.slice(0, batchSize);
+      const text = buildPageSpecCombinedText(currentManualBatch, designSystem, project.slideSize);
+      const ok = await copyToClipboard(text);
+      setGenStatus(
+        ok
+          ? `スライド${currentManualBatch.map((s) => s.index + 1).join("・")}のプロンプトをコピーしました。claude.aiに貼り付けてください。`
+          : "コピーに失敗しました。",
+        ok ? "success" : "error"
+      );
+    };
+    $("btn-load-gen-response").onclick = async () => {
+      const text = $("paste-gen-response").value.trim();
+      if (!text) {
+        setGenStatus("貼り付け欄が空です。", "error");
+        return;
+      }
+      try {
+        const slidesByIndex = new Map(slides.map((s) => [s.index, s]));
+        const results = await parseAndSaveGenResponse(text, slidesByIndex);
+        const mismatchCount = results.filter((r) => !r.match).length;
+        setGenStatus(
+          `${results.length}枚読み込みました${mismatchCount > 0 ? `（うちテキスト不一致 ${mismatchCount}枚。要確認）` : ""}。`,
+          mismatchCount > 0 ? "error" : "success"
+        );
+        $("paste-gen-response").value = "";
+        updateGenProgressUI(slides);
+        renderGenReviewGrid(project, slides, mediaUrlMap);
+      } catch (e) {
+        console.error(e);
+        setGenStatus("読み込みに失敗しました: " + e.message, "error");
+      }
+    };
+
+    // --- APIキー自動実行モード（有料） ---
+    const pauseRef = { current: false };
+    $("btn-gen-start").onclick = async () => {
+      pauseRef.current = false;
+      $("btn-gen-start").hidden = true;
+      $("btn-gen-pause").hidden = false;
+      setGenStatus("生成を開始しました...", null);
+      try {
+        await runGenQueueApi(project, slides, designSystem, pauseRef, (index, done, total) => {
+          setGenStatus(`スライド${index + 1}を生成中...（${done}/${total}）`, null);
+          updateGenProgressUI(slides);
+        });
+      } catch (e) {
+        console.error(e);
+        setGenStatus("生成中にエラーが発生しました: " + e.message, "error");
+      } finally {
+        updateGenProgressUI(slides);
+        renderGenReviewGrid(project, slides, mediaUrlMap);
+        $("btn-gen-start").hidden = false;
+        $("btn-gen-pause").hidden = true;
+        const { total, done, failed } = computeGenProgress(slides);
+        if (done + failed >= total) {
+          setGenStatus(`全${total}枚の処理が完了しました（失敗${failed}枚）。下のレビューを確認してください。`, "success");
+        } else if (!pauseRef.current) {
+          setGenStatus("生成を停止しました。", null);
+        } else {
+          setGenStatus("一時停止しました。「生成を開始する」で続きから再開できます。", "success");
+        }
+      }
+    };
+    $("btn-gen-pause").onclick = () => {
+      pauseRef.current = true;
+      setGenStatus("停止処理中...（現在のページの完了を待っています）", null);
     };
   }
 

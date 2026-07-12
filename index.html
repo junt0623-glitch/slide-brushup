@@ -269,6 +269,18 @@
   .gen-badge--failed { background: #f6e6e2; color: var(--color-danger); }
   .gen-approve-label { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; margin-top: 6px; }
 
+  .diff-details { margin-top: 8px; font-size: 0.78rem; }
+  .diff-details summary { cursor: pointer; color: var(--color-celadon-dark); }
+  .diff-legend { color: var(--color-ink-soft); font-size: 0.72rem; margin: 6px 0; }
+  .diff-text {
+    background: #faf9f6; border: 1px solid var(--color-border); border-radius: 4px;
+    padding: 8px; margin-top: 4px; line-height: 1.8; white-space: pre-wrap; word-break: break-word;
+    max-height: 220px; overflow: auto;
+  }
+  .diff-del { background: #f6e6e2; color: var(--color-danger); text-decoration: line-through; }
+  .diff-ins { background: #eaf3ec; color: var(--color-celadon-dark); text-decoration: underline; }
+  .diff-fallback-note { color: var(--color-amber); font-size: 0.72rem; }
+
   .ai-plan-result { margin-top: 16px; }
   .ai-plan-result h3 { font-size: 0.88rem; margin: 16px 0 6px; }
   .ai-plan-result h3:first-child { margin-top: 0; }
@@ -957,6 +969,15 @@
       return e.rows.map((row) => row.join("\t")).join("\n");
     }
     return "";
+  }
+
+  /** elements配列からスライド全体のテキストを連結する（textConcatの生成と同じルール）。
+   *  一致確認できなかった場合に、元のテキストと生成後のテキストを見比べる表示に使う。 */
+  function elementsPlainTextConcat(elements) {
+    return (elements || [])
+      .filter((e) => e.type === "text" || e.type === "shape" || e.type === "table")
+      .map(elementPlainText)
+      .join("");
   }
 
   /* ============================================================
@@ -3187,6 +3208,63 @@
     if (kind) el.classList.add(kind === "error" ? "is-error" : "is-success");
   }
 
+  /** 2つの文字列の差分を求める（文字単位のLCSベース簡易diff）。
+   *  「テキスト不一致」の原因を具体的に見せるための表示専用。判定自体は
+   *  空白除去済みの完全一致比較（flattenCharsForCompare）で行っている。 */
+  function simpleDiff(a, b) {
+    const n = a.length, m = b.length;
+    const dp = new Array(n + 1);
+    for (let i = 0; i <= n; i++) dp[i] = new Uint32Array(m + 1);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    const ops = [];
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) {
+        ops.push({ type: "equal", ch: a[i] });
+        i++; j++;
+      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+        ops.push({ type: "delete", ch: a[i] });
+        i++;
+      } else {
+        ops.push({ type: "insert", ch: b[j] });
+        j++;
+      }
+    }
+    while (i < n) { ops.push({ type: "delete", ch: a[i] }); i++; }
+    while (j < m) { ops.push({ type: "insert", ch: b[j] }); j++; }
+    const merged = [];
+    for (const op of ops) {
+      const last = merged[merged.length - 1];
+      if (last && last.type === op.type) last.text += op.ch;
+      else merged.push({ type: op.type, text: op.ch });
+    }
+    return merged;
+  }
+
+  function renderDiffHtml(original, generated) {
+    // 差分計算が重くなりすぎないよう、極端に長いテキストは簡易表示にフォールバックする
+    if (original.length > 4000 || generated.length > 4000) {
+      return (
+        "<p class='diff-fallback-note'>テキストが長いため差分ハイライトは省略します。以下は単純比較です。</p>" +
+        "<p><strong>元のテキスト:</strong></p><pre>" + escapeHtml(original) + "</pre>" +
+        "<p><strong>生成後のテキスト:</strong></p><pre>" + escapeHtml(generated) + "</pre>"
+      );
+    }
+    const ops = simpleDiff(original, generated);
+    return ops
+      .map((op) => {
+        const t = escapeHtml(op.text);
+        if (op.type === "delete") return `<del class="diff-del">${t}</del>`;
+        if (op.type === "insert") return `<ins class="diff-ins">${t}</ins>`;
+        return t;
+      })
+      .join("");
+  }
+
   function renderGenReviewGrid(project, slides, mediaUrlMap) {
     const grid = $("gen-review-grid");
     grid.innerHTML = "";
@@ -3218,6 +3296,33 @@
         canvas.style.padding = "8px";
       }
       card.appendChild(canvas);
+
+      if (s.genStatus === "done" && !s.genTextMatch) {
+        const diffDetails = document.createElement("details");
+        diffDetails.className = "diff-details";
+        const summary = document.createElement("summary");
+        summary.textContent = "何が変わったかを確認する";
+        diffDetails.appendChild(summary);
+        const diffBody = document.createElement("div");
+        diffBody.className = "diff-body";
+        diffDetails.appendChild(diffBody);
+        diffDetails.addEventListener(
+          "toggle",
+          () => {
+            if (diffDetails.open && !diffBody.dataset.rendered) {
+              const original = s.textConcat;
+              const generated = elementsPlainTextConcat(s.genElements);
+              diffBody.innerHTML =
+                '<p class="diff-legend"><del class="diff-del">取り消し線</del> = 元にあったが生成後に消えた文字 ／ ' +
+                '<ins class="diff-ins">下線</ins> = 生成後に新しく現れた文字</p>' +
+                '<div class="diff-text">' + renderDiffHtml(original, generated) + "</div>";
+              diffBody.dataset.rendered = "1";
+            }
+          },
+          { once: false }
+        );
+        card.appendChild(diffDetails);
+      }
 
       if (s.genStatus === "done") {
         const label = document.createElement("label");

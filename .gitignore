@@ -1,0 +1,5 @@
+# Playwrightテストのローカル実行で生成されるもの（CIはnpm installで都度取得する）
+node_modules/
+package-lock.json
+playwright-report/
+test-results/

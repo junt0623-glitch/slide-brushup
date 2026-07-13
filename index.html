@@ -258,6 +258,19 @@
     border: 1px solid var(--color-border); border-radius: 4px; box-sizing: border-box; resize: vertical;
   }
 
+  .easy-flow { border: 2px solid var(--color-celadon); }
+  .easy-steps {
+    list-style: none; display: flex; flex-wrap: wrap; gap: 6px;
+    margin: 0 0 12px; padding: 0;
+  }
+  .easy-steps li {
+    font-size: 0.78rem; padding: 4px 12px; border-radius: 999px;
+    background: #eee9df; color: var(--color-ink-soft);
+  }
+  .easy-steps li.is-active { background: var(--color-celadon); color: #fff; font-weight: 700; }
+  .easy-steps li.is-done { background: #eaf3ec; color: var(--color-celadon-dark); }
+  .easy-guide { font-size: 0.85rem; margin: 0 0 10px; line-height: 1.8; }
+
   .progress-track {
     background: #eee9df; border-radius: 999px; height: 8px; overflow: hidden; margin: 8px 0 14px;
   }
@@ -486,6 +499,35 @@
       <p class="preserve-warning__note">
         グラフ・SmartArt・埋め込みオブジェクト・動画・音声等を含むため、Phase 2以降でも元データをそのまま保持します。
       </p>
+    </section>
+
+    <!-- かんたんブラッシュアップ（無料・ガイド付きフロー） -->
+    <section id="easy-section" class="ai-section easy-flow">
+      <div class="ai-section__header">
+        <h2 class="section-heading">かんたんブラッシュアップ（無料）</h2>
+      </div>
+      <p class="ai-section__note">
+        インポート済みのこのデッキを、下のガイドに沿った最小限の操作でブラッシュアップします。
+        <a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a>（無料アカウント可）との
+        コピー&貼り付けだけで完結し、APIキーも費用も不要です。
+        細かく操作したい場合は、下の「AIによる全体構成分析」以降のセクションを直接使えます（進捗は共有されます）。
+      </p>
+      <ol class="easy-steps">
+        <li data-step="1">1. 全体分析</li>
+        <li data-step="2">2. デザイン選択</li>
+        <li data-step="3">3. ページ生成</li>
+        <li data-step="4">4. 書き出し</li>
+      </ol>
+      <p id="easy-guide" class="easy-guide"></p>
+      <div class="ai-section__actions">
+        <button id="btn-easy-action" class="btn"></button>
+      </div>
+      <div id="easy-paste-wrap">
+        <textarea id="easy-paste-area" class="ai-paste-area"
+          placeholder="claude.aiの回答（JSON）をここに貼り付けると、自動で読み込まれます"></textarea>
+        <button id="btn-easy-load" class="btn btn--ghost btn--small">貼り付けた回答を読み込む（自動で読み込まれない場合）</button>
+      </div>
+      <p id="easy-status" class="status" aria-live="polite"></p>
     </section>
 
     <section id="ai-section" class="ai-section">
@@ -2307,6 +2349,12 @@
   async function parseAndSaveSummaryResponse(resultText, slides) {
     const parsed = extractJson(resultText);
     if (!Array.isArray(parsed)) throw new Error("ページ要約の応答が配列ではありませんでした。");
+    return savePageSummaries(parsed, slides);
+  }
+
+  /** 解釈済みのページ要約配列をスライドへ保存する（従来の①応答と、かんたんモードの
+   *  統合応答のpageSummaries、どちらからも呼ばれる共通処理）。 */
+  async function savePageSummaries(parsed, slides) {
     const byIndex = new Map(parsed.map((p) => [p.index, p]));
     for (const s of slides) {
       const summary = byIndex.get(s.index);
@@ -2331,10 +2379,9 @@
     return parseAndSaveSummaryResponse(resultText, slides);
   }
 
-  const DESIGN_SYSTEM_PROMPT = `あなたは展示会図録・学術発表スライドのデザインディレクターです。
-デッキ全体の要約カードと密度メトリクスをもとに、次の4点を検討してください。
-
-1. キーメッセージ: デッキ全体を通じて伝えたい要点を3〜5個
+  /* デザイン分析の指示と出力形式は、従来の②単体プロンプトと「かんたんモード」の
+   * 統合プロンプトの両方で使うため、部品として共有する（文言が二重管理でずれるのを防ぐ）。 */
+  const DESIGN_ANALYSIS_TASK_TEXT = `1. キーメッセージ: デッキ全体を通じて伝えたい要点を3〜5個
 2. 分割/統合プラン: 情報が過密/過疎なスライドの分割・統合提案（各項目に根拠を必ず記す。
    提案がなければ空配列でよい）
 3. 反復スライド挿入計画: キーメッセージを反復して印象付けるための挿入位置・見せ方の提案
@@ -2349,14 +2396,9 @@
 
 さらに、与えられた代表ページ（representativePages）それぞれについて、3案ごとに
 簡易プレビュー用のブロック配置（blocks）を作成してください。blocksは実際の再構築ではなく
-概観比較用の簡略版で構いません（4〜8ブロック程度、見出し・本文・画像枠・アクセント要素など）。
+概観比較用の簡略版で構いません（4〜8ブロック程度、見出し・本文・画像枠・アクセント要素など）。`;
 
-出力はJSONオブジェクトのみ。前置き・後書き・コードフェンスは一切付けないこと。
-座標(x,y,w,h)の単位はインチで、渡されるslideWidthIn/slideHeightInの範囲に収めること。
-
-出力形式:
-{
-  "keyMessages": ["...", "..."],
+  const DESIGN_OUTPUT_FIELDS_TEXT = `  "keyMessages": ["...", "..."],
   "splitMergePlan": [{"targetIndices": [数値,...], "action": "split|merge|keep", "rationale": "..."}],
   "repeatPlan": [{"message": "...", "suggestedIndices": [数値,...], "rationale": "..."}],
   "designSystems": [
@@ -2373,8 +2415,73 @@
         ]}
       ]
     }
-  ]
+  ]`;
+
+  const DESIGN_SYSTEM_PROMPT = `あなたは展示会図録・学術発表スライドのデザインディレクターです。
+デッキ全体の要約カードと密度メトリクスをもとに、次の4点を検討してください。
+
+${DESIGN_ANALYSIS_TASK_TEXT}
+
+出力はJSONオブジェクトのみ。前置き・後書き・コードフェンスは一切付けないこと。
+座標(x,y,w,h)の単位はインチで、渡されるslideWidthIn/slideHeightInの範囲に収めること。
+
+出力形式:
+{
+${DESIGN_OUTPUT_FIELDS_TEXT}
 }`;
+
+  /* かんたんモード用: ①ページ要約と②全体構成分析を1つのプロンプトに統合し、
+   * claude.aiとの往復を1回で済ませる（無料フローの手数削減の中核）。 */
+  const EASY_ANALYSIS_SYSTEM_PROMPT = `あなたは展示会図録・学術発表スライドの構成分析とデザインディレクションを行うアシスタントです。
+<deck>内の各ページの抽出テキストと密度メトリクスをもとに、次のAとBを1回の回答でまとめて行ってください。
+
+A. ページ要約: スライドごとに「役割分類」「タイトル推定」「一文要約」を作成する。
+   - 要約は入力テキストの言い換えに限り、新しい事実や数値を創作しないこと
+   - roleは次のいずれか一語: 表紙 / 目次 / 本文 / データ図表 / まとめ / その他
+
+B. 全体構成の分析とデザイン提案: Aで把握した各ページの役割をふまえ、次の4点を検討する。
+
+${DESIGN_ANALYSIS_TASK_TEXT}
+
+出力はJSONオブジェクトのみ。前置き・後書き・コードフェンスは一切付けないこと。
+座標(x,y,w,h)の単位はインチで、渡されるslideWidthIn/slideHeightInの範囲に収めること。
+
+出力形式:
+{
+  "pageSummaries": [{"index": 数値, "title": "推定タイトル", "oneLiner": "一文要約(40字程度)", "role": "役割"}],
+${DESIGN_OUTPUT_FIELDS_TEXT}
+}`;
+
+  function buildEasyAnalysisUserContent(project, slides) {
+    const repPages = pickRepresentativePages(slides);
+    const pages = slides.map((s) => ({
+      index: s.index,
+      text: s.textConcat.slice(0, 800),
+      charCount: s.textConcat.length,
+      imageCount: s.elements.filter((e) => e.type === "image").length,
+      shapeCount: s.elements.filter((e) => e.type === "shape" && !e.isTextBox).length,
+      tableCount: s.elements.filter((e) => e.type === "table").length,
+      hasNotes: !!s.notes,
+      preserve: effectivePreserve(s),
+    }));
+    const input = {
+      slideWidthIn: project.slideSize.wIn,
+      slideHeightIn: project.slideSize.hIn,
+      totalSlides: slides.length,
+      pages,
+      representativePages: repPages,
+    };
+    return "<deck>\n" + JSON.stringify(input) + "\n</deck>";
+  }
+
+  function buildEasyAnalysisCombinedText(project, slides) {
+    return (
+      EASY_ANALYSIS_SYSTEM_PROMPT +
+      "\n\n" +
+      buildEasyAnalysisUserContent(project, slides) +
+      "\n\n(繰り返しますが、出力はpageSummariesとdesignSystemsを含む1つのJSONオブジェクトのみにしてください。説明文やコードフェンスは不要です。)"
+    );
+  }
 
   function buildDesignUserContent(project, slides) {
     const repPages = pickRepresentativePages(slides);
@@ -2410,6 +2517,12 @@
 
   async function parseAndSaveDesignResponse(resultText, project) {
     const parsed = extractJson(resultText);
+    return saveDesignPlan(parsed, project);
+  }
+
+  /** 解釈済みの全体構成分析オブジェクトをプロジェクトへ保存する（従来の②応答と、
+   *  かんたんモードの統合応答、どちらからも呼ばれる共通処理）。 */
+  async function saveDesignPlan(parsed, project) {
     if (!parsed.designSystems || parsed.designSystems.length === 0) {
       throw new Error("デザインシステム案が応答に含まれていませんでした。");
     }
@@ -3190,7 +3303,200 @@
     }
   }
 
+  /* ============================================================
+   * 10.55 UI: かんたんブラッシュアップ（無料・ガイド付きフロー）
+   *   ・①要約＋②全体分析を1つの統合プロンプトにまとめ、claude.aiとの往復を半減する
+   *   ・貼り付け欄を1つに統一し、回答の種類（分析/ページ生成）を形から自動判別して読み込む
+   *   ・進捗（分析済み/デザイン採用済み/生成残数）から現在のステップを自動判定して案内する
+   *   ・下の従来セクションと同じデータを読み書きするため、途中からどちらの操作に
+   *     切り替えても矛盾しない（かんたんフローは「操作の近道」であって別モードではない）
+   * ============================================================ */
+  let easyRefresh = null; // 現在開いているプロジェクトのかんたんフロー再描画関数
+
+  function setEasyStatus(text, kind) {
+    const el = $("easy-status");
+    el.textContent = text || "";
+    el.classList.remove("is-error", "is-success");
+    if (kind) el.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  function computeEasyStep(project, slides) {
+    if (!project.aiPlan) return 1;
+    if (project.selectedDesignSystemIndex === null || project.selectedDesignSystemIndex === undefined) return 2;
+    // genStatus未設定（デザイン採用直後でキュー初期化前）も「残りあり」として数える
+    const remaining = slides.filter((s) => !effectivePreserve(s) && s.genStatus !== "done");
+    return remaining.length > 0 ? 3 : 4;
+  }
+
+  function countEasyRemaining(slides) {
+    return slides.filter((s) => !effectivePreserve(s) && s.genStatus !== "done").length;
+  }
+
+  async function setupEasySection(project, slides, mediaUrlMap) {
+    const section = $("easy-section");
+    const stepItems = section.querySelectorAll(".easy-steps li");
+    const actionBtn = $("btn-easy-action");
+    const pasteWrap = $("easy-paste-wrap");
+    const pasteArea = $("easy-paste-area");
+    setEasyStatus("", null);
+    pasteArea.value = "";
+
+    function refresh() {
+      const step = computeEasyStep(project, slides);
+      stepItems.forEach((li) => {
+        const n = parseInt(li.dataset.step, 10);
+        li.classList.toggle("is-active", n === step);
+        li.classList.toggle("is-done", n < step);
+      });
+      if (step === 1) {
+        $("easy-guide").textContent =
+          "下のボタンを押すとデッキ全体の分析プロンプトがコピーされ、claude.aiが新しいタブで開きます。" +
+          "新規チャットに貼り付けて送信し、返ってきた回答（JSON）を下の欄に貼り付けてください" +
+          "（ページ要約と全体構成の分析を、1回のやり取りでまとめて行います）。";
+        actionBtn.textContent = "分析プロンプトをコピーして claude.ai を開く";
+        pasteWrap.hidden = false;
+      } else if (step === 2) {
+        $("easy-guide").textContent =
+          "分析結果を読み込みました。下に表示された3つのデザイン案を見比べて、" +
+          "「この案を採用する」を1つ押してください。採用すると次のステップに進みます。";
+        actionBtn.textContent = "デザイン案を見る（下へ移動）";
+        pasteWrap.hidden = true;
+      } else if (step === 3) {
+        const remaining = countEasyRemaining(slides);
+        const batchSize = parseInt($("gen-batch-size").value, 10) || 3;
+        $("easy-guide").textContent =
+          `採用したデザインで各ページを再構築します（残り${remaining}ページ）。` +
+          "ボタンでプロンプトをコピー→claude.aiに貼り付けて送信→回答を下の欄に貼り付け、" +
+          "を残りがなくなるまで繰り返してください。途中でブラウザを閉じても続きから再開できます。";
+        actionBtn.textContent = `次の${Math.min(batchSize, remaining)}ページ分のプロンプトをコピーして claude.ai を開く`;
+        pasteWrap.hidden = false;
+      } else {
+        $("easy-guide").textContent =
+          "すべてのページの生成が完了しました。「要確認: テキスト不一致」の付いたページがあれば" +
+          "④のレビューで内容を確認・承認したうえで、pptxを書き出してください。";
+        actionBtn.textContent = "pptxを書き出す";
+        pasteWrap.hidden = true;
+      }
+    }
+
+    actionBtn.onclick = async () => {
+      const step = computeEasyStep(project, slides);
+      if (step === 1) {
+        const ok = await copyToClipboard(buildEasyAnalysisCombinedText(project, slides));
+        if (ok) window.open("https://claude.ai/new", "_blank", "noopener");
+        setEasyStatus(
+          ok
+            ? "分析プロンプトをコピーしました。claude.aiの新規チャットに貼り付けて送信し、回答を下の欄に貼り付けてください。"
+            : "コピーに失敗しました。手動で選択してコピーしてください。",
+          ok ? "success" : "error"
+        );
+      } else if (step === 2) {
+        $("ai-design-systems").scrollIntoView({ behavior: "smooth", block: "start" });
+        setEasyStatus("下のデザイン案から1つ選んで「この案を採用する」を押してください。", null);
+      } else if (step === 3) {
+        await initGenQueue(slides);
+        const designSystem = project.aiPlan.designSystems[project.selectedDesignSystemIndex];
+        const batchSize = parseInt($("gen-batch-size").value, 10) || 3;
+        const batch = getPendingSlides(slides).slice(0, batchSize);
+        if (batch.length === 0) {
+          refresh();
+          return;
+        }
+        const ok = await copyToClipboard(buildPageSpecCombinedText(batch, designSystem, project.slideSize));
+        if (ok) window.open("https://claude.ai/new", "_blank", "noopener");
+        setEasyStatus(
+          ok
+            ? `スライド${batch.map((s) => s.index + 1).join("・")}のプロンプトをコピーしました。claude.aiに貼り付けて送信し、回答を下の欄に貼り付けてください。`
+            : "コピーに失敗しました。",
+          ok ? "success" : "error"
+        );
+      } else {
+        $("btn-build-output").click();
+        setEasyStatus("書き出しを開始しました。画面上部の検証結果とダウンロードをご確認ください。", "success");
+      }
+    };
+
+    async function loadEasyPaste() {
+      const text = pasteArea.value.trim();
+      if (!text) {
+        setEasyStatus("貼り付け欄が空です。claude.aiの回答をコピーして貼り付けてください。", "error");
+        return;
+      }
+      let parsed;
+      try {
+        parsed = extractJson(text);
+      } catch (e) {
+        setEasyStatus(e.message, "error");
+        return;
+      }
+      try {
+        const isGenResponse =
+          (parsed && !Array.isArray(parsed) && Array.isArray(parsed.pages)) ||
+          (Array.isArray(parsed) && parsed[0] && Array.isArray(parsed[0].elements));
+        if (isGenResponse) {
+          const slidesByIndex = new Map(slides.map((s) => [s.index, s]));
+          const results = await parseAndSaveGenResponse(text, slidesByIndex);
+          const mismatchCount = results.filter((r) => !r.match).length;
+          updateGenProgressUI(slides);
+          renderGenReviewGrid(project, slides, mediaUrlMap);
+          const remaining = countEasyRemaining(slides);
+          setEasyStatus(
+            `${results.length}枚読み込みました` +
+              (mismatchCount > 0 ? `（うちテキスト不一致 ${mismatchCount}枚。④のレビューで確認してください）` : "") +
+              (remaining > 0
+                ? `。残り${remaining}ページです。もう一度ボタンで次のプロンプトをコピーしてください。`
+                : "。すべてのページが完了しました。"),
+            mismatchCount > 0 ? "error" : "success"
+          );
+        } else {
+          const loaded = [];
+          if (Array.isArray(parsed)) {
+            await savePageSummaries(parsed, slides);
+            loaded.push("ページ要約");
+          } else {
+            if (Array.isArray(parsed.pageSummaries)) {
+              await savePageSummaries(parsed.pageSummaries, slides);
+              loaded.push("ページ要約");
+            }
+            if (Array.isArray(parsed.designSystems) && parsed.designSystems.length > 0) {
+              await saveDesignPlan(parsed, project);
+              renderAiPlan(project, slides, mediaUrlMap);
+              loaded.push("全体構成の分析結果");
+            }
+          }
+          if (loaded.length === 0) {
+            throw new Error("回答の形式を判別できませんでした。コピーしたプロンプトへの回答（JSON）をそのまま貼り付けてください。");
+          }
+          // 従来セクション側のボタン状態も同期させる（どちらの操作でも続きができるように）
+          if (slides.some((s) => s.aiSummary)) {
+            $("btn-ai-design").disabled = false;
+            $("btn-copy-design-prompt").disabled = false;
+          }
+          setEasyStatus(
+            loaded.join("と") + "を読み込みました。" + (project.aiPlan ? "下のデザイン案から1つ採用してください。" : ""),
+            "success"
+          );
+        }
+        pasteArea.value = "";
+        refresh();
+      } catch (e) {
+        console.error(e);
+        setEasyStatus("読み込みに失敗しました: " + e.message, "error");
+      }
+    }
+
+    $("btn-easy-load").onclick = loadEasyPaste;
+    // 貼り付けたら自動で読み込む（値の反映後に実行するためタイマーを挟む）
+    pasteArea.onpaste = () => {
+      setTimeout(loadEasyPaste, 0);
+    };
+
+    easyRefresh = refresh;
+    refresh();
+  }
+
   async function setupAiSection(project, slides, mediaUrlMap) {
+    await setupEasySection(project, slides, mediaUrlMap);
     renderAiPlan(project, slides, mediaUrlMap);
     $("btn-ai-design").disabled = !slides.some((s) => s.aiSummary);
     $("btn-copy-design-prompt").disabled = !slides.some((s) => s.aiSummary);
@@ -3202,6 +3508,8 @@
     function applyMode(mode) {
       manualPanel.hidden = mode !== "manual";
       apiPanel.hidden = mode !== "api";
+      // かんたんフローは無料（手動コピペ）の近道なので、APIキー自動実行時は隠す
+      $("easy-section").hidden = mode !== "manual";
     }
     const initialMode = getApiKey() ? "api" : "manual";
     $("ai-mode-" + initialMode).checked = true;
@@ -3230,6 +3538,7 @@
         setAiStatus(`ページ要約を読み込みました（${slides.length}枚）。続けて②を実行できます。`, "success");
         $("btn-ai-design").disabled = false;
         $("btn-copy-design-prompt").disabled = false;
+        if (easyRefresh) easyRefresh();
       } catch (e) {
         console.error(e);
         setAiStatus("読み込みに失敗しました: " + e.message, "error");
@@ -3254,6 +3563,7 @@
         await parseAndSaveDesignResponse(text, project);
         renderAiPlan(project, slides, mediaUrlMap);
         setAiStatus("全体構成の分析結果を読み込みました。デザインシステム案から1つ選択してください。", "success");
+        if (easyRefresh) easyRefresh();
       } catch (e) {
         console.error(e);
         setAiStatus("読み込みに失敗しました: " + e.message, "error");
@@ -3539,6 +3849,7 @@
         $("paste-gen-response").value = "";
         updateGenProgressUI(slides);
         renderGenReviewGrid(project, slides, mediaUrlMap);
+        if (easyRefresh) easyRefresh();
       } catch (e) {
         console.error(e);
         setGenStatus("読み込みに失敗しました: " + e.message, "error");
@@ -3579,6 +3890,9 @@
       pauseRef.current = true;
       setGenStatus("停止処理中...（現在のページの完了を待っています）", null);
     };
+
+    // デザイン採用や生成進行のたびに呼ばれるので、かんたんフローのステップ表示も追随させる
+    if (easyRefresh) easyRefresh();
   }
 
   function setupAiSettingsModal() {

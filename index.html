@@ -2611,7 +2611,9 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 その他の絶対的な制約
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- 画像要素はmediaIdを変更しないこと（新しい画像は生成できません）。位置・サイズの変更は自由
+- 画像要素はmediaIdを変更しないこと（新しい画像は生成できません）。位置・サイズの変更は自由だが、
+  画像本来の縦横比は変えないこと（w,hのどちらかだけを変えて引き伸ばす/押しつぶすのは禁止）。
+  なお万一比率が崩れていても、読み込み時に元の縦横比へシステム側で自動補正されます
 - 表のセル文字列(rows)は上記テキスト同様に一字一句不変。行数・列数の変更も不可（配置のみ）
 - 与えられた要素を漏れなく含めること（削除しない）
 - <pages>で与えられた全ページを出力に含めること（一部だけ返さない）
@@ -2722,6 +2724,43 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
     return genElements;
   }
 
+  /** 元スライドの画像要素について mediaId → 元の縦横比(w/h) のマップを作る。
+   *  AI応答のw/hをこの比率に合わせて補正することで、引き伸ばし/押しつぶしを機械的に防ぐ。 */
+  function buildImageAspectMap(slide) {
+    const map = new Map();
+    const positioned = (slide.elements || []).filter((e) => e.x != null);
+    for (const e of positioned) {
+      if (e.type !== "image" || !e.mediaId || !e.w || !e.h) continue;
+      if (!map.has(e.mediaId)) map.set(e.mediaId, e.w / e.h);
+    }
+    return map;
+  }
+
+  /** AI応答のgenElements内の各画像について、元の縦横比が分かっていれば、
+   *  AIが提案した配置枠(x,y,w,h)の中に収まる最大サイズへ縦横比を保ったまま補正し、
+   *  枠の中央に配置し直す（＝「配置は自由、ただし引き伸ばしは不可」を機械的に保証する）。 */
+  function restoreImageAspect(genElements, aspectMap) {
+    for (const el of genElements) {
+      if (!el || el.type !== "image") continue;
+      const aspect = aspectMap.get(el.mediaId);
+      if (!aspect || !el.w || !el.h) continue;
+      const boxAspect = el.w / el.h;
+      let newW, newH;
+      if (boxAspect > aspect) {
+        newH = el.h;
+        newW = newH * aspect;
+      } else {
+        newW = el.w;
+        newH = newW / aspect;
+      }
+      el.x = el.x + (el.w - newW) / 2;
+      el.y = el.y + (el.h - newH) / 2;
+      el.w = newW;
+      el.h = newH;
+    }
+    return genElements;
+  }
+
   function buildPageSpecCombinedText(pagesBatch, designSystem, slideSize) {
     return (
       PAGE_SPEC_SYSTEM_PROMPT +
@@ -2747,6 +2786,11 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
       // 復元しきれない場合に備え、最終的な文字列比較も引き続き行う。
       const tidMap = buildTidTextMap(slide);
       genElements = restoreTextByTid(genElements, tidMap);
+
+      // 画像も同様に、AIが提案したサイズを元の縦横比へ機械的に補正する
+      // （プロンプトで指示するだけでは引き伸ばし/押しつぶしを防ぎきれないため）。
+      const aspectMap = buildImageAspectMap(slide);
+      genElements = restoreImageAspect(genElements, aspectMap);
 
       const match = flattenCharsForCompare(genElements) === flattenCharsForCompare(slide.elements);
       slide.genElements = genElements;

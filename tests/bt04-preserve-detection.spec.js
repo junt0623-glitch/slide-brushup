@@ -18,7 +18,7 @@ test('グラフ・SmartArtは温存対象、表・通常テキストは温存対
   await expect(page.locator('#stat-preserve-count')).toHaveText('2'); // chart + smartart
 
   const actual = await page.evaluate(async () => {
-    const dbReq = indexedDB.open('slide-brushup', 1);
+    const dbReq = indexedDB.open('slide-brushup'); // バージョン省略＝アプリが作成した既存DBをそのまま開く
     const db = await new Promise((res, rej) => {
       dbReq.onsuccess = () => res(dbReq.result);
       dbReq.onerror = () => rej(dbReq.error);

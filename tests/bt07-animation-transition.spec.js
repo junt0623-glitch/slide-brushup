@@ -14,7 +14,7 @@ async function importAnim(page) {
 
 async function getSlides(page) {
   return page.evaluate(async () => {
-    const dbReq = indexedDB.open('slide-brushup', 1);
+    const dbReq = indexedDB.open('slide-brushup'); // バージョン省略＝アプリが作成した既存DBをそのまま開く
     const db = await new Promise((res, rej) => { dbReq.onsuccess = () => res(dbReq.result); dbReq.onerror = () => rej(dbReq.error); });
     const tx = db.transaction(['slides'], 'readonly');
     const all = await new Promise((res, rej) => { const r = tx.objectStore('slides').getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });

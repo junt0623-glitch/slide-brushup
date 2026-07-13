@@ -18,7 +18,7 @@ test('image.pptxの画像がバイト単位で一致し、重複排除される'
   await expect(page.locator('#stat-image-count')).toHaveText('1');
 
   const mediaRecords = await page.evaluate(async () => {
-    const dbReq = indexedDB.open('slide-brushup', 1);
+    const dbReq = indexedDB.open('slide-brushup'); // バージョン省略＝アプリが作成した既存DBをそのまま開く
     const db = await new Promise((res, rej) => {
       dbReq.onsuccess = () => res(dbReq.result);
       dbReq.onerror = () => rej(dbReq.error);

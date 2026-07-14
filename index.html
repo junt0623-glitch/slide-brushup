@@ -620,6 +620,7 @@
             <option value="3" selected>3ページ</option>
             <option value="5">5ページ</option>
             <option value="10">10ページ</option>
+            <option value="20">20ページ（応答が長くなります。読み込みに失敗する場合は減らしてください）</option>
           </select>
         </label>
         <button id="btn-copy-gen-batch" class="btn btn--ghost">次のバッチのプロンプトをコピーする</button>
@@ -2615,15 +2616,30 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
   画像本来の縦横比は変えないこと（w,hのどちらかだけを変えて引き伸ばす/押しつぶすのは禁止）。
   なお万一比率が崩れていても、読み込み時に元の縦横比へシステム側で自動補正されます
 - 表のセル文字列(rows)は上記テキスト同様に一字一句不変。行数・列数の変更も不可（配置のみ）
-- 与えられた要素を漏れなく含めること（削除しない）
+- 与えられた要素（すべての画像・表・テキスト）を1つ残らず出力に含めること。
+  要素を省略した場合、システムが元の位置・元の大きさのまま機械的に再挿入するため、
+  新しいデザインと不整合な見た目になります。省くのではなく、自分で意図をもって配置し直すこと
 - <pages>で与えられた全ページを出力に含めること（一部だけ返さない）
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+レイアウト品質の必須条件（文字が読めない・要素が消えたスライドは失敗です）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- 文字サイズの下限を厳守: 本文はtypography.bodySizePt以上、タイトルはtypography.titleSizePt以上。
+  **元のスライドより文字を小さくしないこと**（スクリーン投影で読めることが最優先。
+  下限未満のサイズはシステムが機械的に引き上げます）
+- 収まらない場合の優先順位: 文字を小さくするのではなく、①テキスト領域(w,h)を広げる
+  ②余白・装飾を減らす ③要素の配置を組み替える、で解決すること
+- 画像は元のスライドと同等以上の大きさ・存在感を保つこと（小さく縮めて隅に追いやらない）
+- 要素同士を重ねないこと。スライドの端から0.3インチ以上の余白を取ること
+- 元の読み順（上から下）を保ち、見出しとそれに対応する本文・画像は近くに配置すること
 
 デザインシステムに従うこと:
 - 色はdesignSystem.paletteの色のみ使用（primary/secondary/accent/background）
 - タイトルはtypography.titleSizePt以上、本文はtypography.bodySizePt程度とし、サイズ差を明確に
 - 本文は左揃え
 - 装飾目的だけのアクセントバーやタイトル下線は使わない
-- 元のレイアウトに縛られず、デザインシステムに沿った洗練された配置に組み直してよい
+- 元のレイアウトに縛られず、デザインシステムに沿った洗練された配置に組み直してよい。
+  ただし上のレイアウト品質の必須条件（可読性・全要素保持）を崩してまで装飾性を優先しないこと
 
 出力はJSONオブジェクトのみ。前置き・後書き・コードフェンス不要。座標(x,y,w,h)の単位はインチ。
 
@@ -2692,16 +2708,20 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
     return "<pages>\n" + JSON.stringify(input) + "\n</pages>";
   }
 
-  /** 元スライドの全runについて tid → 原文テキスト のマップを作る。
-   *  AI応答のtextをこのマップの値で上書きすることで、文字列の改変を機械的に打ち消す。 */
-  function buildTidTextMap(slide) {
+  /** 元スライドの全runについて tid → {原文テキスト, 元フォントサイズ} のマップを作る。
+   *  AI応答のtextをこのマップの値で上書きすることで、文字列の改変を機械的に打ち消す。
+   *  元フォントサイズは、文字が読めないほど小さくされる劣化の検出・補正に使う。 */
+  function buildTidRunMap(slide) {
     const map = new Map();
     const positioned = (slide.elements || []).filter((e) => e.x != null);
     positioned.forEach((e, elIndex) => {
       if (e.type !== "shape" && e.type !== "text") return;
       (e.paragraphs || []).forEach((p, pi) => {
         (p.runs || []).forEach((r, ri) => {
-          map.set(`${elIndex}-${pi}-${ri}`, r.break ? "" : r.text || "");
+          map.set(`${elIndex}-${pi}-${ri}`, {
+            text: r.break ? "" : r.text || "",
+            sizePt: typeof r.sizePt === "number" ? r.sizePt : null,
+          });
         });
       });
     });
@@ -2716,7 +2736,91 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
       for (const p of el.paragraphs || []) {
         for (const r of p.runs || []) {
           if (r && typeof r.tid === "string" && tidMap.has(r.tid)) {
-            r.text = tidMap.get(r.tid);
+            r.text = tidMap.get(r.tid).text;
+          }
+        }
+      }
+    }
+    return genElements;
+  }
+
+  /** AI応答から欠落した要素（画像・表・テキスト要素）を検出し、元の位置・内容のまま追補する。
+   *  「テキストを削除して新しいテキストも作らない」「画像を省略する」型の劣化を機械的に打ち消す。
+   *  テキスト・表の追補は、応答がtid形式に従っている場合のみ行う（tidの無い応答では
+   *  「言い換え」と「削除」を区別できず二重追加になり得るため、従来どおり不一致検出に委ねる）。 */
+  function restoreMissingElements(genElements, slide) {
+    const positioned = (slide.elements || []).filter((e) => e.x != null);
+    const genTidSet = new Set();
+    for (const el of genElements) {
+      for (const p of (el && el.paragraphs) || []) {
+        for (const r of p.runs || []) {
+          if (r && typeof r.tid === "string") genTidSet.add(r.tid);
+        }
+      }
+    }
+    const genHasTids = genTidSet.size > 0;
+    const genChars = flattenCharsForCompare(genElements);
+    const genImageIds = new Set(
+      genElements.filter((e) => e && e.type === "image").map((e) => e.mediaId)
+    );
+
+    const restored = [];
+    positioned.forEach((e, elIndex) => {
+      if (e.type === "image") {
+        // 画像はmediaIdで機械的に照合できるため、無条件に欠落を検出・追補する
+        if (e.mediaId && !genImageIds.has(e.mediaId)) {
+          restored.push({ type: "image", x: e.x, y: e.y, w: e.w, h: e.h, mediaId: e.mediaId });
+        }
+        return;
+      }
+      if (!genHasTids) return;
+      const chars = flattenCharsForCompare([e]);
+      if (!chars) return; // テキストを持たない装飾図形は、新デザインでの置き換えを許容する
+      if (e.type === "table") {
+        if (!genChars.includes(chars)) {
+          restored.push({
+            type: "table", x: e.x, y: e.y, w: e.w, h: e.h,
+            rows: JSON.parse(JSON.stringify(e.rows)),
+          });
+        }
+        return;
+      }
+      if (e.type !== "shape" && e.type !== "text") return;
+      const hasTid = (e.paragraphs || []).some((p, pi) =>
+        (p.runs || []).some((r, ri) => genTidSet.has(`${elIndex}-${pi}-${ri}`))
+      );
+      if (hasTid || genChars.includes(chars)) return; // 応答内に残っている＝欠落ではない
+      restored.push({
+        type: "shape", x: e.x, y: e.y, w: e.w, h: e.h,
+        shapeType: e.shapeType || "rect",
+        isTextBox: e.isTextBox !== false,
+        fill: e.fill || null,
+        line: e.line || null,
+        paragraphs: JSON.parse(JSON.stringify(e.paragraphs || [])),
+      });
+    });
+    return genElements.concat(restored);
+  }
+
+  /** 文字が読めないほど小さくされる劣化を機械的に防ぐ。
+   *  下限 = デザインシステムの本文サイズ（元のrunがそれより小さい場合は元のサイズを尊重）。
+   *  ・sizePtが下限未満 → 下限へ引き上げ
+   *  ・sizePt未指定でtidから元サイズが分かる → 元サイズを引き継ぐ（意図しない縮小を防ぐ） */
+  function enforceMinFontSize(genElements, tidMap, designSystem) {
+    const bodyPt =
+      (designSystem && designSystem.typography && designSystem.typography.bodySizePt) || 14;
+    for (const el of genElements) {
+      if (!el || (el.type !== "shape" && el.type !== "text")) continue;
+      for (const p of el.paragraphs || []) {
+        for (const r of p.runs || []) {
+          if (!r || r.break) continue;
+          const orig =
+            typeof r.tid === "string" && tidMap.has(r.tid) ? tidMap.get(r.tid).sizePt : null;
+          const floor = orig != null ? Math.min(orig, bodyPt) : bodyPt;
+          if (typeof r.sizePt === "number") {
+            if (r.sizePt < floor) r.sizePt = floor;
+          } else if (orig != null) {
+            r.sizePt = orig;
           }
         }
       }
@@ -2770,7 +2874,7 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
     );
   }
 
-  async function parseAndSaveGenResponse(resultText, slidesByIndex) {
+  async function parseAndSaveGenResponse(resultText, slidesByIndex, designSystem) {
     const parsed = extractJson(resultText);
     const pages = Array.isArray(parsed) ? parsed : parsed.pages;
     if (!Array.isArray(pages)) throw new Error("生成結果の応答にpages配列が含まれていませんでした。");
@@ -2781,16 +2885,18 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
       if (!slide) continue;
       let genElements = Array.isArray(p.elements) ? p.elements : [];
 
-      // tidを使って原文テキストを機械的に復元する（AIが言い換えても打ち消される）。
-      // これで大半のケースは一致するはずだが、AIがtidを落とした/新規runを足した等で
-      // 復元しきれない場合に備え、最終的な文字列比較も引き続き行う。
-      const tidMap = buildTidTextMap(slide);
+      // AIの申告を信用せず、実際の値を機械的に検証・補正する（品質保証の中核）:
+      // ①tidで原文テキストを復元（言い換えを打ち消す）
+      // ②欠落した要素（画像・表・テキスト）を元の位置に追補（削除・省略を打ち消す）
+      // ③画像を元の縦横比へ補正（引き伸ばし/押しつぶしを打ち消す）
+      // ④フォントサイズの下限を担保（読めないほどの縮小を打ち消す）
+      // それでも復元しきれない場合に備え、最終的な文字列比較も引き続き行う。
+      const tidMap = buildTidRunMap(slide);
       genElements = restoreTextByTid(genElements, tidMap);
-
-      // 画像も同様に、AIが提案したサイズを元の縦横比へ機械的に補正する
-      // （プロンプトで指示するだけでは引き伸ばし/押しつぶしを防ぎきれないため）。
+      genElements = restoreMissingElements(genElements, slide);
       const aspectMap = buildImageAspectMap(slide);
       genElements = restoreImageAspect(genElements, aspectMap);
+      genElements = enforceMinFontSize(genElements, tidMap, designSystem);
 
       const match = flattenCharsForCompare(genElements) === flattenCharsForCompare(slide.elements);
       slide.genElements = genElements;
@@ -2849,7 +2955,7 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
       try {
         const userContent = buildPageSpecUserContent([s], designSystem, project.slideSize);
         const resultText = await callClaudeApi(models.pageModel, PAGE_SPEC_SYSTEM_PROMPT, userContent, 4000, "page-spec");
-        await parseAndSaveGenResponse(resultText, slidesByIndex);
+        await parseAndSaveGenResponse(resultText, slidesByIndex, designSystem);
       } catch (e) {
         s.genStatus = "failed";
         s.genError = e.message;
@@ -3479,7 +3585,11 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
           (Array.isArray(parsed) && parsed[0] && Array.isArray(parsed[0].elements));
         if (isGenResponse) {
           const slidesByIndex = new Map(slides.map((s) => [s.index, s]));
-          const results = await parseAndSaveGenResponse(text, slidesByIndex);
+          const activeDesign =
+            project.aiPlan && project.selectedDesignSystemIndex != null
+              ? project.aiPlan.designSystems[project.selectedDesignSystemIndex]
+              : null;
+          const results = await parseAndSaveGenResponse(text, slidesByIndex, activeDesign);
           const mismatchCount = results.filter((r) => !r.match).length;
           updateGenProgressUI(slides);
           renderGenReviewGrid(project, slides, mediaUrlMap);
@@ -3884,7 +3994,7 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
       }
       try {
         const slidesByIndex = new Map(slides.map((s) => [s.index, s]));
-        const results = await parseAndSaveGenResponse(text, slidesByIndex);
+        const results = await parseAndSaveGenResponse(text, slidesByIndex, designSystem);
         const mismatchCount = results.filter((r) => !r.match).length;
         setGenStatus(
           `${results.length}枚読み込みました${mismatchCount > 0 ? `（うちテキスト不一致 ${mismatchCount}枚。要確認）` : ""}。`,

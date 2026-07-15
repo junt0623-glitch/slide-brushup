@@ -258,6 +258,17 @@
     border: 1px solid var(--color-border); border-radius: 4px; box-sizing: border-box; resize: vertical;
   }
 
+  .typo-issue-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+  .typo-issue {
+    border: 1px solid var(--color-border); border-radius: var(--radius);
+    padding: 10px 12px; background: #fbfaf7;
+  }
+  .typo-issue__meta { font-size: 0.76rem; color: var(--color-ink-soft); margin: 0 0 6px; font-weight: 700; }
+  .typo-issue__diff {
+    font-size: 0.85rem; line-height: 1.7; background: #fff; border: 1px solid var(--color-border);
+    border-radius: 4px; padding: 8px 10px; margin: 0 0 8px; word-break: break-word;
+  }
+
   .easy-flow { border: 2px solid var(--color-celadon); }
   .easy-steps {
     list-style: none; display: flex; flex-wrap: wrap; gap: 6px;
@@ -499,6 +510,25 @@
       <p class="preserve-warning__note">
         グラフ・SmartArt・埋め込みオブジェクト・動画・音声等を含むため、Phase 2以降でも元データをそのまま保持します。
       </p>
+    </section>
+
+    <!-- 簡易修正（誤字脱字チェック・AI不要） -->
+    <section id="typo-section" class="ai-section">
+      <div class="ai-section__header">
+        <h2 class="section-heading">簡易修正（誤字脱字・表記ゆれチェック）</h2>
+        <button id="btn-typo-rescan" class="btn btn--ghost btn--small">再スキャンする</button>
+      </div>
+      <p class="ai-section__note">
+        句読点の連続重複（「。。」等）や、余分な空白の重複など、コピペ由来の
+        ケアレスミスを機械的に検出します。<strong>claude.aiとのやり取りは不要</strong>で、
+        その場で1件ずつ確認しながら修正を適用できます（温存スライドは対象外です）。
+        誤検出が起きないよう、意味が変わる可能性のある修正（言い回しの変更等）は対象にしていません。
+      </p>
+      <p id="typo-status" class="status" aria-live="polite"></p>
+      <div class="ai-section__actions">
+        <button id="btn-typo-apply-all" class="btn" disabled>検出した修正をすべて適用する</button>
+      </div>
+      <div id="typo-issue-list" class="typo-issue-list"></div>
     </section>
 
     <!-- かんたんブラッシュアップ（無料・ガイド付きフロー） -->
@@ -2828,6 +2858,154 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
     return genElements;
   }
 
+  /* ============================================================
+   * 7.55 簡易修正（誤字脱字・表記ゆれチェック、AI不要）
+   *   ・claude.aiとのやり取りを一切必要とせず、コピペ由来のケアレスミスを
+   *     機械的なパターンマッチだけで検出・修正する
+   *   ・誤検出で本文の意味を変えてしまうリスクを避けるため、対象は
+   *     「同一文字の連続重複」という曖昧さの無いパターンのみに絞る
+   *     （言い回しの変更や辞書ベースの誤変換修正のような、意味解釈を伴う
+   *     補正は対象外。README「正直な注意点」参照）
+   * ============================================================ */
+  const TYPO_RULES = [
+    {
+      label: "句読点の重複",
+      // 同じ約物・記号が2つ以上連続しているものを1つに畳む（例:「。。」→「。」）
+      apply: (t) => t.replace(/([。、！？!?,.])\1+/g, "$1"),
+    },
+    {
+      label: "空白の重複",
+      // 同じ種類の空白（半角/全角）が2つ以上連続しているものを1つに畳む
+      apply: (t) => t.replace(/([ 　])\1+/g, "$1"),
+    },
+  ];
+
+  /** 1つの文字列に対して、定義済みルールを順に適用した結果を返す。
+   *  どのルールが実際に効いたかをlabelsとして併せて返す（表示用）。 */
+  function computeTypoFix(text) {
+    let fixed = text;
+    const labels = [];
+    for (const rule of TYPO_RULES) {
+      const next = rule.apply(fixed);
+      if (next !== fixed) labels.push(rule.label);
+      fixed = next;
+    }
+    return { fixed, labels };
+  }
+
+  /** スライド1件から、機械的に検出できるケアレスミスを洗い出す。
+   *  温存スライドは出力に反映されない（元データのまま保持される）ため対象外とする。
+   *  elIndex/pi/riは、AI連携で使うtid（"elIndex-pi-ri"）と同じ採番規則にしている。 */
+  function scanSlideTypoIssues(slide) {
+    if (effectivePreserve(slide)) return [];
+    const positioned = (slide.elements || []).filter((e) => e.x != null);
+    const issues = [];
+    positioned.forEach((el, elIndex) => {
+      if (el.type === "shape" || el.type === "text") {
+        (el.paragraphs || []).forEach((p, pi) => {
+          (p.runs || []).forEach((r, ri) => {
+            if (!r || r.break) return;
+            const text = r.text || "";
+            const { fixed, labels } = computeTypoFix(text);
+            if (fixed === text) return;
+            issues.push({
+              kind: "run", elIndex, pi, ri, tid: `${elIndex}-${pi}-${ri}`,
+              original: text, fixed, labels,
+            });
+          });
+        });
+      } else if (el.type === "table") {
+        (el.rows || []).forEach((row, rowIdx) => {
+          (row || []).forEach((cell, colIdx) => {
+            const text = cell || "";
+            const { fixed, labels } = computeTypoFix(text);
+            if (fixed === text) return;
+            issues.push({ kind: "cell", elIndex, rowIdx, colIdx, original: text, fixed, labels });
+          });
+        });
+      }
+    });
+    return issues;
+  }
+
+  /** デッキ全体をスキャンし、スライド番号(slideIndex)を付けたissue一覧を返す。 */
+  function scanAllTypoIssues(slides) {
+    const all = [];
+    for (const slide of slides) {
+      for (const issue of scanSlideTypoIssues(slide)) all.push({ ...issue, slideIndex: slide.index });
+    }
+    return all;
+  }
+
+  /** 既にブラッシュアップ済み(genElements)のスライドについて、修正をtidで機械的に
+   *  同期する。tidが見つからない場合（AIが要素を落として元の内容のまま復元された
+   *  runなど）は、完全一致するテキストが1件だけなら、それを対象とみなして補正する
+   *  （曖昧な場合＝候補が0件/複数件は、誤爆を避けるため何もしない）。 */
+  function syncTypoFixIntoGenElements(genElements, tid, originalText, fixedText) {
+    let matched = false;
+    for (const el of genElements) {
+      if (el.type !== "shape" && el.type !== "text") continue;
+      for (const p of el.paragraphs || []) {
+        for (const r of p.runs || []) {
+          if (r && typeof r.tid === "string" && r.tid === tid) {
+            r.text = fixedText;
+            matched = true;
+          }
+        }
+      }
+    }
+    if (matched) return;
+    const candidates = [];
+    for (const el of genElements) {
+      if (el.type !== "shape" && el.type !== "text") continue;
+      for (const p of el.paragraphs || []) {
+        for (const r of p.runs || []) {
+          if (r && !r.break && (r.text || "") === originalText) candidates.push(r);
+        }
+      }
+    }
+    if (candidates.length === 1) candidates[0].text = fixedText;
+  }
+
+  /** 表セルの同期版。表にはtidが無いため、完全一致テキストが1件だけの場合のみ補正する。 */
+  function syncTypoFixIntoGenTables(genElements, originalText, fixedText) {
+    const candidates = [];
+    for (const el of genElements) {
+      if (el.type !== "table") continue;
+      for (const row of el.rows || []) {
+        for (let c = 0; c < row.length; c++) {
+          if (row[c] === originalText) candidates.push({ row, c });
+        }
+      }
+    }
+    if (candidates.length === 1) candidates[0].row[candidates[0].c] = fixedText;
+  }
+
+  /** 1件のissueをスライドの元データ(slide.elements)へ適用し、既にブラッシュアップ済みなら
+   *  genElementsへも同期する。textConcat/textHashも再計算して整合性を保つ。
+   *  elIndex/pi/ri等はテキスト編集だけでは変わらない（要素の増減を伴わない）ため、
+   *  同一スライド内で複数issueを続けて適用しても座標がずれる心配はない。 */
+  async function applyTypoIssue(slide, issue) {
+    const positioned = (slide.elements || []).filter((e) => e.x != null);
+    const el = positioned[issue.elIndex];
+    if (!el) return;
+    if (issue.kind === "run") {
+      const run = el.paragraphs[issue.pi].runs[issue.ri];
+      run.text = issue.fixed;
+      if (Array.isArray(slide.genElements)) {
+        syncTypoFixIntoGenElements(slide.genElements, issue.tid, issue.original, issue.fixed);
+      }
+    } else {
+      el.rows[issue.rowIdx][issue.colIdx] = issue.fixed;
+      if (Array.isArray(slide.genElements)) {
+        syncTypoFixIntoGenTables(slide.genElements, issue.original, issue.fixed);
+      }
+    }
+    slide.textConcat = elementsPlainTextConcat(slide.elements);
+    slide.textHash = await sha256Hex(slide.textConcat);
+    await idbPut("slides", slide);
+  }
+
   /** 元スライドの画像要素について mediaId → 元の縦横比(w/h) のマップを作る。
    *  AI応答のw/hをこの比率に合わせて補正することで、引き伸ばし/押しつぶしを機械的に防ぐ。 */
   function buildImageAspectMap(slide) {
@@ -3273,6 +3451,7 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
       summary.textContent = "テキストを確認";
       details.appendChild(summary);
       const pre = document.createElement("pre");
+      pre.dataset.slideIndex = String(s.index);
       pre.textContent =
         (s.textConcat || "（テキストなし）") +
         (s.notes ? "\n\n― 発表者ノート ―\n" + s.notes : "");
@@ -3293,6 +3472,7 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
     };
     $("btn-build-output").onclick = () => handleBuildOutput(project, slides, mediaRecords);
 
+    setupTypoSection(project, slides);
     setupAiSection(project, slides, mediaUrlMap);
 
     showScreen("analysis");
@@ -3830,6 +4010,99 @@ ${DESIGN_OUTPUT_FIELDS_TEXT}
         return t;
       })
       .join("");
+  }
+
+  /* ============================================================
+   * 7.56 UI: 簡易修正（誤字脱字・表記ゆれチェック、AI不要）
+   * ============================================================ */
+  let currentTypoIssues = [];
+
+  function setTypoStatus(text, kind) {
+    const el = $("typo-status");
+    el.textContent = text || "";
+    el.classList.remove("is-error", "is-success");
+    if (kind) el.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  /** テキストが編集された可能性があるスライドの「テキストを確認」プレビューを、
+   *  最新のtextConcatで上書きする（簡易修正の適用結果が見た目にも反映されるように）。 */
+  function refreshSlideTextPreview(slide) {
+    const pre = document.querySelector(
+      `#slide-grid pre[data-slide-index="${slide.index}"]`
+    );
+    if (!pre) return;
+    pre.textContent =
+      (slide.textConcat || "（テキストなし）") + (slide.notes ? "\n\n― 発表者ノート ―\n" + slide.notes : "");
+  }
+
+  function renderTypoIssueList(slidesByIndex, issues) {
+    const list = $("typo-issue-list");
+    list.innerHTML = "";
+    $("btn-typo-apply-all").disabled = issues.length === 0;
+    if (issues.length === 0) {
+      list.innerHTML = '<p class="empty-state">検出されたケアレスミスはありません。</p>';
+      return;
+    }
+    for (const issue of issues) {
+      const row = document.createElement("div");
+      row.className = "typo-issue";
+
+      const meta = document.createElement("p");
+      meta.className = "typo-issue__meta";
+      meta.textContent = `スライド ${issue.slideIndex + 1} ・ ${issue.labels.join("・")}`;
+      row.appendChild(meta);
+
+      const diff = document.createElement("div");
+      diff.className = "typo-issue__diff";
+      diff.innerHTML = renderDiffHtml(issue.original, issue.fixed);
+      row.appendChild(diff);
+
+      const btn = document.createElement("button");
+      btn.className = "btn btn--small";
+      btn.textContent = "この修正を適用する";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        const slide = slidesByIndex.get(issue.slideIndex);
+        await applyTypoIssue(slide, issue);
+        refreshSlideTextPreview(slide);
+        await refreshTypoScan(slidesByIndex);
+      });
+      row.appendChild(btn);
+
+      list.appendChild(row);
+    }
+  }
+
+  async function refreshTypoScan(slidesByIndex) {
+    const slides = Array.from(slidesByIndex.values());
+    currentTypoIssues = scanAllTypoIssues(slides);
+    setTypoStatus(
+      currentTypoIssues.length > 0
+        ? `${currentTypoIssues.length}件のケアレスミス候補を検出しました。内容を確認のうえ適用してください。`
+        : "ケアレスミスは検出されませんでした。",
+      currentTypoIssues.length > 0 ? null : "success"
+    );
+    renderTypoIssueList(slidesByIndex, currentTypoIssues);
+  }
+
+  function setupTypoSection(project, slides) {
+    const slidesByIndex = new Map(slides.map((s) => [s.index, s]));
+    refreshTypoScan(slidesByIndex);
+
+    $("btn-typo-rescan").onclick = () => refreshTypoScan(slidesByIndex);
+
+    $("btn-typo-apply-all").onclick = async () => {
+      $("btn-typo-apply-all").disabled = true;
+      setTypoStatus("修正を適用中...", null);
+      const count = currentTypoIssues.length;
+      for (const issue of currentTypoIssues) {
+        const slide = slidesByIndex.get(issue.slideIndex);
+        await applyTypoIssue(slide, issue);
+      }
+      for (const slide of slidesByIndex.values()) refreshSlideTextPreview(slide);
+      await refreshTypoScan(slidesByIndex);
+      setTypoStatus(`${count}件のケアレスミスをすべて適用しました。`, "success");
+    };
   }
 
   function renderGenReviewGrid(project, slides, mediaUrlMap) {
